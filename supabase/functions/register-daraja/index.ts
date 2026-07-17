@@ -85,9 +85,18 @@ serve(async (req) => {
 
     const registerData = await registerResponse.json();
     if (!registerResponse.ok || registerData.errorMessage) {
+      const message = String(registerData.errorMessage || registerData.ResponseDescription || "");
+      if (message.toLowerCase().includes("already registered")) {
+        return json({
+          success: true,
+          warning: message,
+          data: registerData,
+          confirmation_url: confirmationUrl,
+        });
+      }
       return json({
         success: false,
-        error: registerData.errorMessage || registerData.ResponseDescription || "Daraja URL registration failed",
+        error: message || "Daraja URL registration failed",
         response: registerData,
       }, 400);
     }

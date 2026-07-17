@@ -6074,9 +6074,14 @@ async function saveSettings(){
         });
         const regJson = await regResp.json().catch(()=>({}));
         if(!regResp.ok || regJson.error){
-          alert('Failed to register webhook with Safaricom: ' + (regJson.error || regJson.message || regResp.status));
-          if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent='Save Settings'; }
-          return;
+          const regMessage = String(regJson.error || regJson.message || '').toLowerCase();
+          if(regMessage.includes('already registered')){
+            toast('Safaricom URLs are already registered. Daraja settings will still be saved.', 'warning');
+          }else{
+            alert('Failed to register webhook with Safaricom: ' + (regJson.error || regJson.message || regResp.status));
+            if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent='Save Settings'; }
+            return;
+          }
         }
       }catch(regErr){
         alert('Failed to register webhook with Safaricom: ' + regErr.message);
