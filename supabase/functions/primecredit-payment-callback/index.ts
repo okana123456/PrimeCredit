@@ -78,19 +78,33 @@ async function findClient(supabase: any, businessId: string, accountNumber: stri
 }
 
 serve(async (req) => {
+  console.log("PrimeCredit callback request", { method: req.method, url: req.url });
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
     const body = await req.json();
     const transId = String(body?.TransID || "").trim();
-    if (!transId) return accepted();
+    console.log("PrimeCredit callback payload", {
+      transId,
+      amount: body?.TransAmount,
+      shortcode: body?.BusinessShortCode,
+      account: body?.BillRefNumber,
+      phone: body?.MSISDN,
+    });
+    if (!transId) {
+      console.log("PrimeCredit callback ignored: missing TransID");
+      return accepted();
+    }
 
     const shortcode = String(body?.BusinessShortCode || "").trim();
     const accountNumber = String(body?.BillRefNumber || "").trim();
     const amount = Number(body?.TransAmount || 0);
     const payerPhone = String(body?.MSISDN || "").trim();
     const payerName = `${body?.FirstName || ""} ${body?.MiddleName || ""} ${body?.LastName || ""}`.replace(/\s+/g, " ").trim();
-    if (!shortcode || !amount || amount <= 0) return accepted();
+    if (!shortcode || !amount || amount <= 0) {
+      console.log("PrimeCredit callback ignored: missing shortcode or amount", { transId, shortcode, amount });
+      return accepted();
+    }
 
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL") || "",
@@ -105,6 +119,7 @@ serve(async (req) => {
       .maybeSingle();
 
     const businessId = settings?.business_id || null;
+    console.log("PrimeCredit callback business lookup", { transId, shortcode, businessId, autoConfirm: settings?.mpesa_auto_confirm });
     const { data: queue } = await supabase
       .from("mpesa_callback_queue")
       .insert({
@@ -123,10 +138,14 @@ serve(async (req) => {
       .select("id")
       .maybeSingle();
 
-    if (!businessId) return accepted();
+    if (!businessId) {
+      console.log("PrimeCredit callback stored without business match", { transId, shortcode });
+      return accepted();
+    }
 
     const client = await findClient(supabase, businessId, accountNumber, payerPhone);
     if (!client) {
+      console.log("PrimeCredit callback unmatched client", { transId, businessId, accountNumber, payerPhone });
       await supabase.from("unmatched_payments").insert({
         amount,
         account_number: accountNumber,
@@ -152,6 +171,7 @@ serve(async (req) => {
       .maybeSingle();
 
     if (!loan) {
+      console.log("PrimeCredit callback unmatched loan", { transId, businessId, clientId: client.id, amount });
       await supabase.from("unmatched_payments").insert({
         amount,
         account_number: accountNumber,
@@ -166,6 +186,7 @@ serve(async (req) => {
     }
 
     if (!settings?.mpesa_auto_confirm) {
+      console.log("PrimeCredit callback queued for manual confirmation", { transId, businessId, loanId: loan.id });
       if (queue?.id) await supabase.from("mpesa_callback_queue").update({ loan_id: loan.id }).eq("id", queue.id);
       return accepted();
     }
@@ -243,6 +264,7 @@ serve(async (req) => {
         .eq("id", queue.id);
     }
 
+    console.log("PrimeCredit callback confirmed repayment", { transId, businessId, clientId: client.id, loanId: loan.id, repaymentId: repayment.id, appliedAmount, newBalance });
     return accepted();
   } catch (error) {
     console.error("PrimeCredit C2B callback error:", error);
