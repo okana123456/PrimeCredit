@@ -68,7 +68,7 @@ serve(async (req) => {
       }, 400);
     }
 
-    const confirmationUrl = `${supabaseUrl}/functions/v1/payment-callback`;
+    const confirmationUrl = `${supabaseUrl}/functions/v1/primecredit-payment-callback`;
     const registerResponse = await fetch(`${url}/mpesa/c2b/v2/registerurl`, {
       method: "POST",
       headers: {
