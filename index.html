@@ -208,7 +208,10 @@ tr:hover{background:rgba(37,99,235,.04)}
 .sidebar{transform:translateX(-100%);width:200px}
 .sidebar.open{transform:translateX(0)}
 .main-content{margin-left:0;padding:8px;padding-top:48px}
-.hamburger{display:block}
+.hamburger{display:block;left:auto;right:12px;top:12px;width:44px;height:44px;padding:0;font-size:22px;border-radius:10px;box-shadow:0 8px 20px rgba(0,0,0,.12)}
+.sidebar.open~.main-content{filter:none}
+.sidebar.open .sidebar-header{padding-top:18px}
+.sidebar-header{padding-right:54px}
 .form-row{grid-template-columns:1fr}
 .kpi-grid{grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:10px}
 .dash-grid-3,.dash-grid-2{grid-template-columns:1fr;gap:6px}
@@ -501,6 +504,22 @@ function filterByDate(data, dateField, filterState) {
 }
 const $$ = (sel) => document.querySelectorAll(sel);
 const fmtMoney = (n) => 'KES ' + Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+function isEmailConfirmationReturn(){
+  const hash = String(window.location.hash || '');
+  const search = String(window.location.search || '');
+  return /type=(signup|email_change|invite)/i.test(hash) || /type=(signup|email_change|invite)/i.test(search);
+}
+async function showSignInAfterEmailConfirmation(){
+  try{ await supabaseClient.auth.signOut(); }catch(e){}
+  currentUser = null;
+  localStorage.removeItem('primecredit_current_user');
+  localStorage.removeItem('primecredit_last_activity');
+  $('#appShell').style.display='none';
+  $('#loginScreen').style.display='flex';
+  switchAuthTab('signin');
+  window.history.replaceState(null, '', window.location.pathname);
+  toast('Email confirmed. Please sign in with your email and password.', 'success');
+}
 function localISODate(d=new Date()){
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
@@ -1268,6 +1287,10 @@ async function resolveUserRole(authUser, staffCache = null, pwd = null){
 }
 
 async function checkAuthSession(){
+  if(isEmailConfirmationReturn()){
+    await showSignInAfterEmailConfirmation();
+    return false;
+  }
   // Honor session timeout up-front
   if(checkSessionTimeout()) return false;
   const cachedUserStr = localStorage.getItem('primecredit_current_user');
@@ -1287,6 +1310,10 @@ async function checkAuthSession(){
   if(session?.user){
     // DO NOT resolve roles and log them in if doing password recovery
     if (window.location.hash.includes('type=recovery')) {
+        return false;
+    }
+    if (isEmailConfirmationReturn()) {
+        await showSignInAfterEmailConfirmation();
         return false;
     }
     await resolveUserRole(session.user);
@@ -1452,6 +1479,10 @@ async function executeSwitchUser(email) {
 }
 
 supabaseClient.auth.onAuthStateChange(async(event,session)=>{
+  if(event==='SIGNED_IN' && session?.user && isEmailConfirmationReturn()){
+    await showSignInAfterEmailConfirmation();
+    return;
+  }
   if (event === 'PASSWORD_RECOVERY') {
     openModal(`
       <h2>Reset Your Password</h2>
