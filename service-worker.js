@@ -1,4 +1,4 @@
-const CACHE_NAME = 'primecredit-shell-v2';
+const CACHE_NAME = 'primecredit-shell-v4';
 const APP_SHELL = [
   './',
   './index.html',

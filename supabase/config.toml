@@ -1,0 +1,17 @@
+[functions.register-primecredit-business]
+verify_jwt = false
+
+[functions.register-daraja]
+verify_jwt = false
+
+[functions.payment-callback]
+verify_jwt = false
+
+[functions.start-service-payment]
+verify_jwt = false
+
+[functions.service-payment-callback]
+verify_jwt = false
+
+[functions.service-daraja-diagnostics]
+verify_jwt = false

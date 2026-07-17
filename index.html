@@ -7,6 +7,7 @@
 <meta name="description" content="PrimeCredit - Complete loan management system for responsible lending, client accounts, repayments and portfolio reporting.">
 <meta name="theme-color" content="#0f5c4a">
 <meta name="application-name" content="PrimeCredit">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="PrimeCredit">
@@ -372,7 +373,7 @@ let cachedData = {};
 let charts = {};
 let appSettings = null; 
 let serviceBilling = { status:'unknown', paid:false, locked:false, reminder:false, pending:false, cycleMonth:null, checkedAt:null };
-const SERVICE_BILLING_AMOUNT = 2000;
+const SERVICE_BILLING_AMOUNT = 3000;
 const SERVICE_BILLING_FIRST_REMINDER_DATE = '2026-08-02';
 const SERVICE_BILLING_REMINDER_DAY = 2;
 const SERVICE_BILLING_LOCK_DAY = 4;
@@ -6059,9 +6060,16 @@ async function saveSettings(){
       const saveBtn = document.querySelector('[onclick="saveSettings()"]');
       if(saveBtn){ saveBtn.disabled=true; saveBtn.textContent='Registering with Safaricom...'; }
       try{
+        const { data: sessionData } = await supabaseClient.auth.getSession();
+        const accessToken = sessionData?.session?.access_token;
+        if(!accessToken){
+          alert('Please sign in again before saving Daraja settings.');
+          if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent='Save Settings'; }
+          return;
+        }
         const regResp = await fetch(SUPABASE_URL+'/functions/v1/register-daraja', {
           method:'POST',
-          headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_KEY},
+          headers:{'Content-Type':'application/json','Authorization':'Bearer '+accessToken},
           body: JSON.stringify({ shortcode, consumer_key: consumerKey, consumer_secret: consumerSecret, environment: darajaEnv })
         });
         const regJson = await regResp.json().catch(()=>({}));
