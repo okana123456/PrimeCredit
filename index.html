@@ -359,7 +359,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 // ═══ SUPABASE INIT ═══
 const SUPABASE_URL = 'https://ahzdlgsdpmltrlhbervv.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFoemRsZ3NkcG1sdHJsaGJlcnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNDc3MjIsImV4cCI6MjA5OTgyMzcyMn0.Exj4iqLayPtQQHk1y7ZWQAT8i93fsRjz1Kwe_2mNtFU';
-const APP_VERSION = 'primecredit-2026-07-20-cache-v3';
+const APP_VERSION = 'primecredit-2026-07-20-cache-v4';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
     auth: { storageKey: 'primecredit-main-auth-v1' }
@@ -370,36 +370,85 @@ const adminAuthClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY,
 });
 let sb = (table) => supabaseClient.from(table);
 
-async function choosePrimeCreditStaffRecord(records){
-  const candidates = (records||[]).filter(Boolean).filter(s=>s.is_active!==false);
+async function choosePrimeCreditStaffRecord(records, authUser=null){
+  const seen = new Set();
+  const candidates = (records||[])
+    .filter(Boolean)
+    .filter(s=>s.is_active!==false)
+    .filter(s=>{
+      const key = s.id || `${s.business_id||''}:${String(s.email||'').toLowerCase()}`;
+      if(seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   if(!candidates.length) return (records||[])[0] || null;
-  const preferredBiz = localStorage.getItem('primecredit_preferred_business_id') || '';
-  const scored = await Promise.all(candidates.map(async staff=>{
-    let clientsCount = 0, loansCount = 0, appsCount = 0;
+
+  // Browser storage is useful as a migration hint, but the selected workspace is
+  // also saved in Supabase Auth metadata so a fresh browser opens the same business.
+  const localPreferredBiz = localStorage.getItem('primecredit_preferred_business_id') || '';
+  const serverPreferredBiz = authUser?.user_metadata?.primecredit_business_id || '';
+  const authUserId = authUser?.id || '';
+
+  async function visibleRowCount(table, businessId){
     try{
-      const [clientsR, loansR, appsR] = await Promise.all([
-        sb('loan_clients').select('id', {count:'exact', head:true}).eq('business_id', staff.business_id),
-        sb('loans').select('id', {count:'exact', head:true}).eq('business_id', staff.business_id),
-        sb('loan_applications').select('id', {count:'exact', head:true}).eq('business_id', staff.business_id)
-      ]);
-      clientsCount = clientsR.count || 0;
-      loansCount = loansR.count || 0;
-      appsCount = appsR.count || 0;
-    }catch(_){}
-    const roleBoost = String(staff.role||'').includes('admin') ? 5 : 0;
-    const preferredBoost = preferredBiz && staff.business_id===preferredBiz ? 1 : 0;
-    const dataScore = clientsCount * 10 + loansCount * 20 + appsCount * 8;
-    const createdScore = staff.created_at ? new Date(staff.created_at).getTime() / 1000000000000 : 0;
-    return {staff, score: dataScore + roleBoost + preferredBoost + createdScore};
+      const counted = await sb(table).select('id', {count:'exact', head:true}).eq('business_id', businessId);
+      if(!counted.error && Number.isFinite(counted.count)) return counted.count;
+
+      // Some RLS/browser combinations return no HEAD count. Probe actual visible rows
+      // instead of treating the workspace as empty immediately.
+      const probed = await sb(table).select('id').eq('business_id', businessId).limit(25);
+      if(probed.error) return 0;
+      return probed.data?.length || 0;
+    }catch(_){
+      return 0;
+    }
+  }
+
+  const scored = await Promise.all(candidates.map(async staff=>{
+    const [clientsCount, loansCount, appsCount] = await Promise.all([
+      visibleRowCount('loan_clients', staff.business_id),
+      visibleRowCount('loans', staff.business_id),
+      visibleRowCount('loan_applications', staff.business_id)
+    ]);
+    return {
+      staff,
+      localPreferred: !!localPreferredBiz && staff.business_id===localPreferredBiz,
+      serverPreferred: !!serverPreferredBiz && staff.business_id===serverPreferredBiz,
+      exactAuthLink: !!authUserId && staff.auth_user_id===authUserId,
+      dataScore: clientsCount * 10 + loansCount * 20 + appsCount * 8,
+      lastLogin: staff.last_login ? new Date(staff.last_login).getTime() : 0,
+      createdAt: staff.created_at ? new Date(staff.created_at).getTime() : Number.MAX_SAFE_INTEGER
+    };
   }));
-  scored.sort((a,b)=>b.score-a.score);
+
+  scored.sort((a,b)=>{
+    // A populated business must beat an empty duplicate, even when an older browser
+    // saved the empty business locally. Preferences only resolve otherwise equal data.
+    if(a.dataScore!==b.dataScore) return b.dataScore-a.dataScore;
+    if(a.localPreferred!==b.localPreferred) return a.localPreferred ? -1 : 1;
+    if(a.serverPreferred!==b.serverPreferred) return a.serverPreferred ? -1 : 1;
+    if(a.exactAuthLink!==b.exactAuthLink) return a.exactAuthLink ? -1 : 1;
+    if(a.lastLogin!==b.lastLogin) return b.lastLogin-a.lastLogin;
+    return a.createdAt-b.createdAt; // Prefer the original membership over a newer empty duplicate.
+  });
+
   const chosen = scored[0]?.staff || candidates[0];
-  if(chosen?.business_id) localStorage.setItem('primecredit_preferred_business_id', chosen.business_id);
+  if(chosen?.business_id){
+    localStorage.setItem('primecredit_preferred_business_id', chosen.business_id);
+    if(authUser?.id && serverPreferredBiz!==chosen.business_id){
+      try{
+        await supabaseClient.auth.updateUser({data:{primecredit_business_id:chosen.business_id}});
+      }catch(error){
+        console.warn('Could not sync preferred PrimeCredit business:', error);
+      }
+    }
+  }
   return chosen;
 }
 
 // ═══ STATE ═══
 let currentUser = null;
+let emailLoginInProgress = false;
 let currentSection = 'dashboard';
 let cachedData = {};
 let charts = {};
@@ -1110,35 +1159,29 @@ async function handleEmailLogin(){
   if(!email||!pwd)return toast('Enter your email and password','warning');
   const btn=document.querySelector('#panelSignIn .btn-primary');
   if(btn){btn.disabled=true;btn.textContent='Signing in...';}
-  
+
+  // Keep the saved staff record only as an offline fallback. Online authentication
+  // must remain the source of truth so every browser resolves the same Supabase user.
+  let offlineEntry = null;
+  try{
+    const cachedAuth = JSON.parse(localStorage.getItem('primecredit_offline_auth') || '{}');
+    if(cachedAuth[email] && cachedAuth[email].passwordHash === btoa(pwd)) offlineEntry = cachedAuth[email];
+  }catch(_){}
+
   // Nuke stuck locks right before sign in
   try {
-      for (let i = 0; i < localStorage.length; i++) {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
           const key = localStorage.key(i);
           if (key && key.startsWith('lock:')) localStorage.removeItem(key);
       }
   } catch(e) {}
 
-  // 1. Check Offline Cache First
-  try {
-      const cachedAuthStr = localStorage.getItem('primecredit_offline_auth');
-      if (cachedAuthStr) {
-          const cachedAuth = JSON.parse(cachedAuthStr);
-          if (cachedAuth[email] && cachedAuth[email].passwordHash === btoa(pwd)) {
-              await resolveUserRole(null, cachedAuth[email].staffObj, pwd); 
-              if(btn){btn.disabled=false;btn.textContent='Sign In';}
-              return;
-          }
-      }
-  } catch(e) {}
-
+  emailLoginInProgress = true;
   try{
-    // 2. Supabase Login with Promise.race Timeout (8s)
     const authPromise = supabaseClient.auth.signInWithPassword({email,password:pwd});
     const timeoutPromise = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000));
-    
     const { data, error } = await Promise.race([authPromise, timeoutPromise]);
-    
+
     if(error){
       if(error.message.toLowerCase().includes('email not confirmed')){
         toast('Please confirm your email first. Check your inbox for a confirmation link.','warning');
@@ -1151,13 +1194,20 @@ async function handleEmailLogin(){
     }
     await resolveUserRole(data.user, null, pwd);
   }catch(e){
-    if (e.message === 'timeout') {
-        toast("Network timeout: Could not reach authentication servers. Offline cache unavailable for this user.", "error");
-    } else {
-        toast(e.message,'error');
+    const networkFailure = e.message === 'timeout' || /failed to fetch|network|load failed/i.test(e.message||'');
+    if(networkFailure && offlineEntry?.staffObj){
+      await resolveUserRole(null, offlineEntry.staffObj, pwd);
+      toast('Supabase could not be reached. Signed in using saved offline access.','warning');
+    }else if(e.message === 'timeout'){
+      toast('Network timeout: Could not reach authentication servers and no offline access is saved for this user.','error');
+    }else{
+      toast(e.message,'error');
     }
   }
-  finally{if(btn){btn.disabled=false;btn.textContent='Sign In';}}
+  finally{
+    emailLoginInProgress = false;
+    if(btn){btn.disabled=false;btn.textContent='Sign In';}
+  }
 }
 
 async function handleEmailSignUp(){
@@ -1265,8 +1315,31 @@ async function resolveUserRole(authUser, staffCache = null, pwd = null){
         }
 
         if(matchedStaff.length){
-          staff = await choosePrimeCreditStaffRecord(matchedStaff);
-          if(staff && authUser.id && staff.auth_user_id !== authUser.id){
+          // Normalize every membership carrying this verified login email before probing
+          // business data. This lets RLS recognise the same user in a fresh browser and
+          // prevents an unlinked real workspace from looking empty during selection.
+          if(authUser.id && authUser.email){
+            const sameEmail = String(authUser.email).trim().toLowerCase();
+            const toLink = matchedStaff.filter(row=>
+              row?.id &&
+              String(row.email||'').trim().toLowerCase()===sameEmail &&
+              row.auth_user_id!==authUser.id
+            );
+            if(toLink.length){
+              const linkResults = await Promise.allSettled(toLink.map(row=>
+                sb('loan_staff')
+                  .update({auth_user_id:authUser.id})
+                  .eq('id',row.id)
+                  .ilike('email',authUser.email)
+              ));
+              linkResults.forEach((result,index)=>{
+                if(result.status==='fulfilled' && !result.value?.error) toLink[index].auth_user_id=authUser.id;
+              });
+            }
+          }
+
+          staff = await choosePrimeCreditStaffRecord(matchedStaff, authUser);
+          if(staff && authUser.id){
             await sb('loan_staff').update({auth_user_id: authUser.id, last_login: new Date().toISOString()}).eq('id', staff.id);
           }
         }
@@ -1499,37 +1572,40 @@ async function executeSwitchUser(email) {
     }
 }
 
-supabaseClient.auth.onAuthStateChange(async(event,session)=>{
-  if(event==='SIGNED_IN' && session?.user && isEmailConfirmationReturn()){
-    await showSignInAfterEmailConfirmation();
-    return;
-  }
-  if (event === 'PASSWORD_RECOVERY') {
-    openModal(`
-      <h2>Reset Your Password</h2>
-      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">
-        Please enter a new password for your account.
-      </p>
-      <div class="form-group">
-        <label>New Password (min 6 characters)</label>
-        <input class="input" type="password" id="newResetPassword" placeholder="••••••••">
-      </div>
-      <div class="form-group">
-        <label>Confirm Password</label>
-        <input class="input" type="password" id="confirmResetPassword" placeholder="••••••••">
-      </div>
-      <div class="modal-actions">
-        <button class="btn btn-primary" onclick="submitNewPassword()">Update Password</button>
-      </div>
-    `);
-    window.history.replaceState(null, '', window.location.pathname);
-  }
-  else if(event==='SIGNED_IN'&&session?.user&&!currentUser){
-    if (!window.location.hash.includes('type=recovery')) {
-        await loadSettings();
-        await resolveUserRole(session.user);
+supabaseClient.auth.onAuthStateChange((event,session)=>{
+  // Do not await Supabase calls inside this callback. Defer them until the auth
+  // client has released its internal lock, otherwise a fresh-browser login can hang.
+  setTimeout(async()=>{
+    if(event==='SIGNED_IN' && session?.user && isEmailConfirmationReturn()){
+      await showSignInAfterEmailConfirmation();
+      return;
     }
-  }
+    if (event === 'PASSWORD_RECOVERY') {
+      openModal(`
+        <h2>Reset Your Password</h2>
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">
+          Please enter a new password for your account.
+        </p>
+        <div class="form-group">
+          <label>New Password (min 6 characters)</label>
+          <input class="input" type="password" id="newResetPassword" placeholder="••••••••">
+        </div>
+        <div class="form-group">
+          <label>Confirm Password</label>
+          <input class="input" type="password" id="confirmResetPassword" placeholder="••••••••">
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-primary" onclick="submitNewPassword()">Update Password</button>
+        </div>
+      `);
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+    else if(event==='SIGNED_IN'&&session?.user&&!currentUser&&!emailLoginInProgress){
+      if (!window.location.hash.includes('type=recovery')) {
+        await resolveUserRole(session.user);
+      }
+    }
+  },0);
 });
 
 // ═══ NAVIGATION ═══
