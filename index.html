@@ -1293,19 +1293,6 @@ async function checkAuthSession(){
   }
   // Honor session timeout up-front
   if(checkSessionTimeout()) return false;
-  const cachedUserStr = localStorage.getItem('primecredit_current_user');
-  if (cachedUserStr) {
-      try {
-          currentUser = JSON.parse(cachedUserStr);
-          touchSession();
-          showApp();
-          // Run background tasks silently
-          loadSettings();
-          applyRolloverPenalties();
-          return true;
-      } catch(e) {}
-  }
-
   const{data:{session}}=await supabaseClient.auth.getSession();
   if(session?.user){
     // DO NOT resolve roles and log them in if doing password recovery
@@ -2167,9 +2154,9 @@ async function openAddClientModal(){
     <div class="form-group"><label>Address</label><input class="input" id="cAddress"></div>
     <div class="form-row"><div class="form-group"><label>Occupation</label><input class="input" id="cOccupation"></div><div class="form-group"><label>Employer</label><input class="input" id="cEmployer"></div></div>
     <div class="form-group"><label>Daily Income (KES)</label><input class="input" type="number" id="cIncome" placeholder="e.g. 500"></div>
-    <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)">🔒 <strong>Guarantor Details</strong></div>
-    <div class="form-row"><div class="form-group"><label>Guarantor Full Name</label><input class="input" id="cNokName"></div><div class="form-group"><label>Guarantor Phone</label><input class="input" id="cNokPhone"></div></div>
-    <div class="form-group"><label>Guarantor Relationship</label><input class="input" id="cNokRel" placeholder="e.g. Spouse, Sibling, Friend"></div>
+    <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)"><strong>Next of Kin Details</strong></div>
+    <div class="form-row"><div class="form-group"><label>Next of Kin Full Name</label><input class="input" id="cNokName"></div><div class="form-group"><label>Next of Kin Phone</label><input class="input" id="cNokPhone"></div></div>
+    <div class="form-group"><label>Next of Kin Relationship</label><input class="input" id="cNokRel" placeholder="e.g. Spouse, Sibling, Friend"></div>
     <div class="form-group"><label>Notes</label><textarea class="textarea" id="cNotes"></textarea></div>
     ${officerDropdown}
     <div style="padding:10px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;margin-bottom:12px;font-size:13px;display:flex;justify-content:space-between;align-items:center">
@@ -2504,9 +2491,9 @@ async function exportClientsExcel(){
         'Occupation':c.occupation||'-',
         'Employer':c.employer||'-',
         'Daily Income (KES)':c.monthly_income||0,
-        'Guarantor Name':c.next_of_kin_name||'-',
-        'Guarantor Phone':c.next_of_kin_phone||'-',
-        'Guarantor Relation':c.next_of_kin_relation||'-',
+        'Next of Kin Name':c.next_of_kin_name||'-',
+        'Next of Kin Phone':c.next_of_kin_phone||'-',
+        'Next of Kin Relation':c.next_of_kin_relation||'-',
         'Date Onboarded':c.created_at?c.created_at.slice(0,10):'-',
         'Loan Officer':officerId?staffMap[officerId]||'-':'-',
         'Total Loans':cLoans.length,
@@ -2633,7 +2620,7 @@ function filterApps(q){q=(q||'').toLowerCase();const f=(cachedData.applications|
 function filterAppStatus(v){const f=v?(cachedData.applications||[]).filter(a=>a.status===v):(cachedData.applications||[]);$('#appsBody').innerHTML=renderAppRows(f)}
 
 async function openNewApplication(){
-  const{data:clients}=await sb('loan_clients').select('id,full_name,phone,id_number').eq('business_id', currentUser.business_id).order('full_name');
+  const{data:clients}=await sb('loan_clients').select('id,full_name,phone,id_number,photo_path,asset_photo_paths,next_of_kin_name,next_of_kin_phone,next_of_kin_relation').eq('business_id', currentUser.business_id).order('full_name');
   const{data:products}=await sb('loan_products').select('*').eq('business_id', currentUser.business_id).eq('is_active',true);
   // Build datalist; encode id in option's data-id via a hidden lookup map
   window._appClientLookup = {};
@@ -2656,13 +2643,16 @@ async function openNewApplication(){
         <input type="hidden" id="appClient" value="">
         <div id="appClientPickInfo" style="margin-top:6px;font-size:12px;color:var(--text-secondary)"></div>
       </div>
-      <p style="font-size:12px;color:var(--text-secondary);margin-top:6px">💡 Guarantor details are collected during client registration.</p>
+      <div id="appClientMediaTools"></div>
     </div>
     <div id="appStep2" style="display:none">
       <div class="form-group"><label>Loan Amount *</label><input class="input" type="number" id="appAmount" oninput="appCalcUpdate()" placeholder="Enter amount"></div>
       <div id="appTierInfo" class="card" style="margin:8px 0;font-size:13px;display:none"></div>
       <div class="form-group"><label>Term (weeks) *</label><input class="input" type="number" id="appTerm" oninput="appCalcUpdate()" placeholder="Number of weeks"></div>
       <div class="form-group"><label>Purpose</label><textarea class="textarea" id="appPurpose"></textarea></div>
+      <div style="padding:10px 12px;background:rgba(217,119,6,0.08);border:1px solid rgba(217,119,6,0.25);border-radius:8px;margin:12px 0;font-size:12px;color:var(--text-secondary)"><strong>Guarantor Details</strong><br>These belong to this loan application, not the client registration record.</div>
+      <div class="form-row"><div class="form-group"><label>Guarantor Full Name *</label><input class="input" id="appGuarantorName"></div><div class="form-group"><label>Guarantor Phone *</label><input class="input" id="appGuarantorPhone"></div></div>
+      <div class="form-group"><label>Guarantor Relationship</label><input class="input" id="appGuarantorRelation" placeholder="e.g. Spouse, Sibling, Friend"></div>
       <div id="appCalcResult" class="card" style="margin-top:8px"></div>
     </div>
     <div id="appStep3" style="display:none"><div id="appReview"></div></div>
@@ -2671,11 +2661,36 @@ async function openNewApplication(){
   window._appStep=1;window._appProducts=products||[];window._appClients=clients||[];
 }
 
+function renderApplicationPhotoTools(client){
+  if(!client) return '';
+  const safeId=String(client.id).replace(/[^a-zA-Z0-9_-]/g,'');
+  const profileInputId=`appProfilePhoto_${safeId}`;
+  const assetInputId=`appAssetPhoto_${safeId}`;
+  const assetCount=clientAssetPaths(client).length;
+  const canManageProfile=hasRole('admin','branch_manager') || (hasRole('loan_officer') && !client.photo_path);
+  return `
+    <div class="card" style="margin-top:10px;background:rgba(59,130,246,0.05);border-color:rgba(59,130,246,0.18)">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        ${clientAvatarHtml(client,false)}
+        <div style="flex:1;min-width:180px">
+          <strong>Photos for this application</strong>
+          <div style="font-size:11px;color:var(--text-secondary)">Profile photo: ${client.photo_path?'uploaded':'not uploaded'} | Asset photos: ${assetCount}</div>
+        </div>
+        ${canManageProfile?`
+          <input id="${profileInputId}" type="file" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="uploadClientPhoto('${client.id}', this, '${escapeHtml(client.photo_path||'')}')">
+          <button class="btn btn-outline btn-sm" onclick="document.getElementById('${profileInputId}').click()">${client.photo_path?'Change profile photo':'Upload profile photo'}</button>
+        `:''}
+        <input id="${assetInputId}" type="file" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="uploadClientAssetPhoto('${client.id}', this)">
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('${assetInputId}').click()">Add asset photo</button>
+      </div>
+      <div style="font-size:11px;color:var(--text-secondary);margin-top:8px">Photos are compressed before saving so they do not consume much storage.</div>
+    </div>`;
+}
+
 function onAppClientPick(val){
   const map = window._appClientLookup||{};
   let id = map[val] || map[(val||'').toLowerCase()];
   if(!id){
-    // Fuzzy: match any client whose full_name or phone contains val
     const v = (val||'').toLowerCase().trim();
     if(v.length>=2){
       const hit = (window._appClients||[]).find(c=>(c.full_name||'').toLowerCase().includes(v)||(c.phone||'').includes(v));
@@ -2684,14 +2699,17 @@ function onAppClientPick(val){
   }
   document.getElementById('appClient').value = id||'';
   const info = document.getElementById('appClientPickInfo');
+  const media = document.getElementById('appClientMediaTools');
   if(info){
     if(id){
       const c = (window._appClients||[]).find(x=>x.id===id);
-      info.innerHTML = c?`✅ Selected: <strong>${c.full_name}</strong> (${c.phone||'no phone'})`:'';
+      info.innerHTML = c?`Selected: <strong>${c.full_name}</strong> (${c.phone||'no phone'})`:'';
       info.style.color='var(--accent-green)';
+      if(media) media.innerHTML=renderApplicationPhotoTools(c);
     } else {
       info.textContent = val ? 'No client matched. Pick from suggestions.' : '';
       info.style.color='var(--text-secondary)';
+      if(media) media.innerHTML='';
     }
   }
 }
@@ -2705,6 +2723,8 @@ function appStepNav(dir){
     const amt=Number($('#appAmount').value);
     if(!amt||amt<=0)return toast('Enter a valid loan amount','warning');
     if(!$('#appTerm').value)return toast('Enter loan term in weeks','warning');
+    if(!($('#appGuarantorName')?.value||'').trim())return toast('Enter guarantor full name','warning');
+    if(!($('#appGuarantorPhone')?.value||'').trim())return toast('Enter guarantor phone','warning');
     buildAppReview();
   }
   window._appStep=s;
@@ -2747,7 +2767,7 @@ function buildAppReview(){
     <p><strong>Weekly Installment:</strong> ${fmtMoney(calc.weekly)}</p>
     <p><strong>Total Payable:</strong> ${fmtMoney(calc.totalPayable)}</p>
     <p><strong>Processing Fee:</strong> ${fmtMoney(processingFeeFor(amt))}</p>
-    <p style="font-size:11px;color:var(--text-secondary)">Guarantor details on file from client registration.</p>
+    <p><strong>Guarantor:</strong> ${escapeHtml($('#appGuarantorName').value||'-')} (${escapeHtml($('#appGuarantorRelation').value||'-')}) ${escapeHtml($('#appGuarantorPhone').value||'')}</p>
   </div>`;
 }
 
@@ -2798,7 +2818,7 @@ async function submitApplication(){
         appOfficerId = prevLoanCheck[0].loan_officer_id;
       }
     }
-    const rec={application_no:appNo,client_id:selectedClientId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,status:'submitted',loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType};
+    const rec={application_no:appNo,client_id:selectedClientId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,status:'submitted',loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRelation')?.value||'').trim()};
     
     // Robust auto-tier → product mapping (case-insensitive, trims, fallbacks)
     const tier=getAutoTier(amt);
@@ -2814,9 +2834,13 @@ async function submitApplication(){
     }
     // Try with product_id first; if Supabase rejects (column may not exist), retry without
     let{error}=await sb('loan_applications').insert(rec);
-    if(error && error.code==='PGRST204' || (error && /product_id|column/.test(error.message||''))){
-      console.warn('product_id column not found in DB — retrying without it');
-      const recFallback={...rec}; delete recFallback.product_id;
+    if(error && (error.code==='PGRST204' || /product_id|guarantor_|column/.test(error.message||''))){
+      console.warn('A newer application column was not found in DB - retrying with old columns only');
+      const recFallback={...rec};
+      delete recFallback.product_id;
+      delete recFallback.guarantor_name;
+      delete recFallback.guarantor_phone;
+      delete recFallback.guarantor_relationship;
       const res2=await sb('loan_applications').insert(recFallback);
       error=res2.error;
     }
@@ -2840,7 +2864,8 @@ async function viewApplication(id){
       <p><strong>Amount:</strong> ${fmtMoney(a.applied_amount)}</p><p><strong>Rate:</strong> ${PRIME_MONTHLY_INTEREST_RATE}% / month</p>
       <p><strong>Term:</strong> ${a.applied_term_weeks} weeks</p><p><strong>Date:</strong> ${fmtDate(a.created_at)}</p>
       <p><strong>Purpose:</strong> ${a.purpose||'-'}</p>
-      <p><strong>Guarantor:</strong> On file from client registration</p>
+      <p><strong>Guarantor:</strong> ${a.guarantor_name||'-'} ${a.guarantor_phone?`(${a.guarantor_phone})`:''}</p>
+      <p><strong>Relationship:</strong> ${a.guarantor_relationship||'-'}</p>
       ${a.rejection_reason?`<p style="grid-column:1/-1"><strong>Rejection Reason:</strong> <span style="color:var(--accent-red)">${a.rejection_reason}</span></p>`:''}
     </div>
     <div class="modal-actions">
@@ -4518,9 +4543,9 @@ async function loadReportData(id){
         'Occupation':c.occupation||'-',
         'Employer':c.employer||'-',
         'Daily Income':c.monthly_income||0,
-        'Guarantor':c.next_of_kin_name||'-',
-        'Guarantor Phone':c.next_of_kin_phone||'-',
-        'Guarantor Relation':c.next_of_kin_relation||'-',
+        'Next of Kin':c.next_of_kin_name||'-',
+        'Next of Kin Phone':c.next_of_kin_phone||'-',
+        'Next of Kin Relation':c.next_of_kin_relation||'-',
         'Date Onboarded':c.created_at?c.created_at.slice(0,10):'-',
         'Loan Officer':officerId?staffMap[officerId]||'-':'-',
         'Total Loans':cLoans.length,
@@ -4536,7 +4561,7 @@ async function loadReportData(id){
       {label:'Total Clients',value:filteredClients.length},
       {label:'Active Borrowers',value:rows.filter(r=>r['Status']==='Active Borrower').length},
       {label:'Past Borrowers',value:rows.filter(r=>r['Status']==='Past Borrower').length}
-    ],rows,cols:['Full Name','ID Number','Phone','Alt Phone','Email','Gender','DOB','Address / Location','Occupation','Employer','Daily Income','Guarantor','Guarantor Phone','Guarantor Relation','Date Onboarded','Loan Officer','Total Loans','Active Loans','Latest Loan #','Total Borrowed','Outstanding (KES)','Arrears (KES)','Status']};
+    ],rows,cols:['Full Name','ID Number','Phone','Alt Phone','Email','Gender','DOB','Address / Location','Occupation','Employer','Daily Income','Next of Kin','Next of Kin Phone','Next of Kin Relation','Date Onboarded','Loan Officer','Total Loans','Active Loans','Latest Loan #','Total Borrowed','Outstanding (KES)','Arrears (KES)','Status']};
   }
   if(id==='collection_daily'){
     const todayStr=today();
@@ -6877,7 +6902,7 @@ async function installPrimeCreditApp(){
   setInstallButtonsVisible(false);
 }
 if('serviceWorker' in navigator && location.protocol.startsWith('http')){
-  window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').catch(error=>console.warn('App installation worker:',error)));
+  window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').then(reg=>reg.update()).catch(error=>console.warn('App installation worker:',error)));
 }
 
 (async()=>{
