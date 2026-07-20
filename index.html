@@ -1038,7 +1038,7 @@ function getAutoRate(amount){
 }
 
 function getAutoTier(amount){
-  return Number(amount)<5000?'Below KES 5,000':'KES 5,000 and above';
+  return Number(amount)<=5000?'KES 5,000 and below':'Above KES 5,000';
 }
 
 // ═══ AUTH — EMAIL + GOOGLE ═══
@@ -1560,9 +1560,9 @@ function calcLoan(principal,rate,type,weeks){return type==='reducing_balance'?ca
 
 // Registration fee is charged once when a client is onboarded.
 const REGISTRATION_FEE = 500;
-// ═══ PROCESSING FEE (flat KES 500 per loan disbursement) ═══
+// Processing fee: KES 250 for KES 5,000 and below; KES 500 above KES 5,000.
 const PRIME_MONTHLY_INTEREST_RATE = 20;
-function processingFeeFor(amount){ return Number(amount)<5000 ? 250 : 500; }
+function processingFeeFor(amount){ return Number(amount)<=5000 ? 250 : 500; }
 function regFeeTag(amount, dateISO){ return `[REG_FEE:${amount}:${dateISO}]`; }
 function parseRegFeeFromNotes(notes){
   if(!notes) return null;
@@ -5760,7 +5760,7 @@ async function renderAccounting() {
       
       <div class="kpi-grid">
         <div class="kpi-card" style="border-top: 4px solid var(--accent-green)"><div class="kpi-label">Net Profit (Revenue)</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(totalRevenue)}</div><div class="kpi-sub">Registration + Processing + Interest + Penalties</div></div>
-        <div class="kpi-card"><div class="kpi-label">Processing Fees</div><div class="kpi-value">${fmtMoney(processingFees)}</div><div class="kpi-sub">KES 250 below 5,000; KES 500 from 5,000</div></div>
+        <div class="kpi-card"><div class="kpi-label">Processing Fees</div><div class="kpi-value">${fmtMoney(processingFees)}</div><div class="kpi-sub">KES 250 up to 5,000; KES 500 above 5,000</div></div>
         <div class="kpi-card"><div class="kpi-label">Registration Fees</div><div class="kpi-value">${fmtMoney(registrationFees)}</div><div class="kpi-sub">${filteredClients.length} new client(s) × KES ${REGISTRATION_FEE}</div></div>
         <div class="kpi-card"><div class="kpi-label">Interest Collected</div><div class="kpi-value">${fmtMoney(interestCollected)}</div></div>
         <div class="kpi-card"><div class="kpi-label">Penalties Collected</div><div class="kpi-value">${fmtMoney(penaltiesCollected)}</div></div>
@@ -5947,7 +5947,7 @@ function renderCalculator(){
     <div class="card" style="max-width:700px">
       <div class="form-row"><div class="form-group"><label>Loan Amount</label><input class="input" type="number" id="calcAmt" value="10000" oninput="updateCalc()"></div><div class="form-group"><label>Interest Rate (% per month)</label><input class="input" type="number" step="0.01" id="calcRate" value="20" oninput="updateCalc()"></div></div>
       <div class="form-row"><div class="form-group"><label>Term (weeks)</label><input class="input" type="number" id="calcTerm" value="4" oninput="updateCalc()"></div><div class="form-group"><label>Interest Type</label><select class="select" id="calcType" onchange="updateCalc()"><option value="flat">Flat Rate</option><option value="reducing_balance">Reducing Balance</option></select></div></div>
-      <div class="form-group"><label>Processing Fee</label><div class="input" style="background:rgba(37,99,235,.06)">KES 250 below KES 5,000; KES 500 from KES 5,000 upward</div></div>
+      <div class="form-group"><label>Processing Fee</label><div class="input" style="background:rgba(37,99,235,.06)">KES 250 for KES 5,000 and below; KES 500 above KES 5,000</div></div>
       <div class="card" style="margin-top:8px;font-size:13px" id="calcTierDetect"></div>
       <div id="calcResults" style="margin-top:16px"></div>
       <button class="btn btn-outline" style="margin-top:12px" onclick="downloadCalcExcel()">Download Schedule (Excel)</button>
@@ -6014,7 +6014,7 @@ async function renderSettings(){
       <div class="card" style="max-width:700px;margin-bottom:16px">
         <h3 style="font-size:16px;margin-bottom:16px">Defaults</h3>
         <div class="form-row"><div class="form-group"><label>Grace Period (days)</label><input class="input" type="number" id="setGrace" value="${settings.default_grace_period||7}"></div><div class="form-group"><label>Late Penalty %</label><input class="input" type="number" id="setPenalty" value="${settings.default_late_penalty_pct||5}"></div></div>
-        <div class="form-group"><label>Processing Fee</label><div class="input" style="background:rgba(59,130,246,0.06);display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong style="color:var(--accent-blue)">KES 250</strong><span style="color:var(--text-secondary);font-size:12px">below KES 5,000</span><strong style="color:var(--accent-blue)">KES 500</strong><span style="color:var(--text-secondary);font-size:12px">from KES 5,000 upward</span></div><input type="hidden" id="setFee" value="0"></div>
+        <div class="form-group"><label>Processing Fee</label><div class="input" style="background:rgba(59,130,246,0.06);display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong style="color:var(--accent-blue)">KES 250</strong><span style="color:var(--text-secondary);font-size:12px">KES 5,000 and below</span><strong style="color:var(--accent-blue)">KES 500</strong><span style="color:var(--text-secondary);font-size:12px">above KES 5,000</span></div><input type="hidden" id="setFee" value="0"></div>
         <div class="form-group"><label>Default Disbursement Method</label><select class="select" id="setDisbMethod"><option value="cash" ${settings.disbursement_method==='cash'?'selected':''}>Cash (Manual)</option><option value="mpesa" ${(!settings.disbursement_method||settings.disbursement_method==='mpesa')?'selected':''}>M-Pesa</option><option value="bank_transfer" ${settings.disbursement_method==='bank_transfer'?'selected':''}>Bank Transfer</option></select></div>
         <div style="background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);border-radius:8px;padding:12px;margin-top:8px">
           <strong style="font-size:13px;color:var(--accent-red)">Rollover Penalty Policy</strong>
