@@ -359,6 +359,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 // ═══ SUPABASE INIT ═══
 const SUPABASE_URL = 'https://ahzdlgsdpmltrlhbervv.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFoemRsZ3NkcG1sdHJsaGJlcnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNDc3MjIsImV4cCI6MjA5OTgyMzcyMn0.Exj4iqLayPtQQHk1y7ZWQAT8i93fsRjz1Kwe_2mNtFU';
+const APP_VERSION = 'primecredit-2026-07-20-cache-v3';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
     auth: { storageKey: 'primecredit-main-auth-v1' }
@@ -368,6 +369,34 @@ const adminAuthClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY,
     auth: { persistSession: false, autoRefreshToken: false, storageKey: 'primecredit-admin-auth' }
 });
 let sb = (table) => supabaseClient.from(table);
+
+async function choosePrimeCreditStaffRecord(records){
+  const candidates = (records||[]).filter(Boolean).filter(s=>s.is_active!==false);
+  if(!candidates.length) return (records||[])[0] || null;
+  const preferredBiz = localStorage.getItem('primecredit_preferred_business_id') || '';
+  const scored = await Promise.all(candidates.map(async staff=>{
+    let clientsCount = 0, loansCount = 0, appsCount = 0;
+    try{
+      const [clientsR, loansR, appsR] = await Promise.all([
+        sb('loan_clients').select('id', {count:'exact', head:true}).eq('business_id', staff.business_id),
+        sb('loans').select('id', {count:'exact', head:true}).eq('business_id', staff.business_id),
+        sb('loan_applications').select('id', {count:'exact', head:true}).eq('business_id', staff.business_id)
+      ]);
+      clientsCount = clientsR.count || 0;
+      loansCount = loansR.count || 0;
+      appsCount = appsR.count || 0;
+    }catch(_){}
+    const roleBoost = String(staff.role||'').includes('admin') ? 5 : 0;
+    const preferredBoost = preferredBiz && staff.business_id===preferredBiz ? 1 : 0;
+    const dataScore = clientsCount * 10 + loansCount * 20 + appsCount * 8;
+    const createdScore = staff.created_at ? new Date(staff.created_at).getTime() / 1000000000000 : 0;
+    return {staff, score: dataScore + roleBoost + preferredBoost + createdScore};
+  }));
+  scored.sort((a,b)=>b.score-a.score);
+  const chosen = scored[0]?.staff || candidates[0];
+  if(chosen?.business_id) localStorage.setItem('primecredit_preferred_business_id', chosen.business_id);
+  return chosen;
+}
 
 // ═══ STATE ═══
 let currentUser = null;
@@ -1221,18 +1250,23 @@ async function resolveUserRole(authUser, staffCache = null, pwd = null){
     let staff = staffCache;
     
     if(!staff && authUser){
-        // 1. Try to find by exact auth_user_id first
-        let { data: staffData } = await sb('loan_staff').select('*').eq('auth_user_id', authUser.id).limit(1);
-        if (staffData && staffData.length > 0) {
-            staff = staffData[0];
+        // Find all possible staff records for this login, then choose the active workspace
+        // that actually has business data. This prevents a shared email from opening
+        // an empty test workspace while the real business has clients.
+        const matchedStaff = [];
+        let { data: staffData } = await sb('loan_staff').select('*').eq('auth_user_id', authUser.id).order('created_at',{ascending:false});
+        if(staffData?.length) matchedStaff.push(...staffData);
+
+        if(authUser.email){
+          const { data: byEmailData } = await sb('loan_staff').select('*').ilike('email', authUser.email).order('created_at',{ascending:false});
+          if(byEmailData?.length) byEmailData.forEach(row=>{
+            if(!matchedStaff.some(existing=>existing.id===row.id)) matchedStaff.push(row);
+          });
         }
 
-        // 2. If not found by ID, try to link by email (case-insensitive)
-        if(!staff && authUser.email){
-          const { data: byEmailData } = await sb('loan_staff').select('*').ilike('email', authUser.email).limit(1);
-          if(byEmailData && byEmailData.length > 0){
-            staff = byEmailData[0];
-            // Link their new auth ID to the pre-created staff record
+        if(matchedStaff.length){
+          staff = await choosePrimeCreditStaffRecord(matchedStaff);
+          if(staff && authUser.id && staff.auth_user_id !== authUser.id){
             await sb('loan_staff').update({auth_user_id: authUser.id, last_login: new Date().toISOString()}).eq('id', staff.id);
           }
         }
@@ -2160,10 +2194,10 @@ async function openAddClientModal(){
     <div class="form-group"><label>Notes</label><textarea class="textarea" id="cNotes"></textarea></div>
     ${officerDropdown}
     <div style="padding:10px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;margin-bottom:12px;font-size:13px;display:flex;justify-content:space-between;align-items:center">
-      <span>A one-time <strong>Registration Fee</strong> will be charged on save and recorded as income.</span>
+      <span>A one-time <strong>Registration Fee</strong> will be deducted from the first loan disbursement.</span>
       <strong style="color:var(--accent-green)">KES \${REGISTRATION_FEE}</strong>
     </div>
-    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnSaveClient" onclick="saveClient()">Save Client (incl. KES \${REGISTRATION_FEE} fee)</button></div>
+    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnSaveClient" onclick="saveClient()">Save Client</button></div>
   `,true);
 }
 
@@ -2204,8 +2238,7 @@ async function saveClient(){
       if(window._clientOffMap) window._clientOffMap[data.id] = assignedOfficerId;
     }
     await audit('client_created','loan_clients',data.id,null,rec);
-    await recordRegistrationFeeIncome(data.id, name, today);
-    toast(`Client added. Registration fee of KES ${REGISTRATION_FEE} recorded as income.`,'success');closeModal();renderClients();
+    toast(`Client added. Registration fee of KES ${REGISTRATION_FEE} will be deducted from the first loan.`,'success');closeModal();renderClients();
   }catch(e){
     if(btn){ btn.disabled=false; btn.textContent='Save Client'; }
     toast(e.message,'error');
@@ -2922,7 +2955,7 @@ async function openDisburseModal(appId){
   const{data:prevLoans}=await sb('loans').select('id').eq('client_id',app.client_id).eq('business_id',currentUser?.business_id).limit(2);
   const isReturning=(prevLoans&&prevLoans.length>0);
   const regFee=isReturning?0:REGISTRATION_FEE;
-  // Net disbursement = full principal (fees are paid upfront in cash, not deducted)
+  const netDisbursement = Math.max(0, Number(amt||0) - procFee - regFee);
   const firstRep=new Date();firstRep.setDate(firstRep.getDate()+7);
   const clientName=app.loan_clients?.full_name||'Unknown Client';
   const clientPhone=app.loan_clients?.phone||'';
@@ -2932,18 +2965,18 @@ async function openDisburseModal(appId){
       <p style="font-size:15px;font-weight:700;margin-bottom:4px">👤 ${clientName}</p>
       <p style="color:var(--text-secondary)">${clientPhone} &nbsp;|&nbsp; <strong>Tier:</strong> ${getAutoTier(amt)} | <strong>Rate:</strong> ${PRIME_MONTHLY_INTEREST_RATE}% / month | <strong>Term:</strong> ${app.applied_term_weeks} weeks</p>
     </div>
-    <div class="form-row"><div class="form-group"><label>Disbursed Amount</label><input class="input" type="number" id="dAmt" value="${amt}"></div><div class="form-group"><label>Disbursement Method</label><select class="select" id="dMethod"><option value="cash">Cash</option><option value="mpesa" selected>M-Pesa</option><option value="bank_transfer">Bank Transfer</option></select></div></div>
+    <div class="form-row"><div class="form-group"><label>Loan Amount</label><input class="input" type="number" id="dAmt" value="${amt}"></div><div class="form-group"><label>Disbursement Method</label><select class="select" id="dMethod"><option value="cash">Cash</option><option value="mpesa" selected>M-Pesa</option><option value="bank_transfer">Bank Transfer</option></select></div></div>
     <div class="form-row"><div class="form-group"><label>Reference / Txn Code</label><input class="input" id="dRef"></div><div class="form-group"><label>Disbursement Date</label><input class="input" type="date" id="dDate" value="${today()}"></div></div>
     <div class="form-group"><label>First Repayment Date</label><input class="input" type="date" id="dFirstRep" value="${localISODate(firstRep)}"></div>
     <div class="card" style="margin-top:12px;font-size:13px">
-      <p style="display:flex;justify-content:space-between"><span>Gross Amount</span><strong>${fmtMoney(amt)}</strong></p>
-      <p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>⚡ Processing Fee — Fees Paid Upfront (Not Deducted)</span><strong>${fmtMoney(procFee)}</strong></p>
+      <p style="display:flex;justify-content:space-between"><span>Gross Loan Amount</span><strong>${fmtMoney(amt)}</strong></p>
+      <p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Processing Fee - deducted from disbursement</span><strong>${fmtMoney(procFee)}</strong></p>
       ${regFee>0
-        ?`<p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>⚡ Registration Fee <span style="font-size:10px">(new client, one-time) — Paid Upfront (Not Deducted)</span></span><strong>${fmtMoney(regFee)}</strong></p>`
-        :`<p style="font-size:11px;color:var(--accent-green)">✅ No registration fee — returning client (${(prevLoans||[]).length} previous loan${(prevLoans||[]).length!==1?'s':''})</p>`}
+        ?`<p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Registration Fee <span style="font-size:10px">(new client, one-time) - deducted from disbursement</span></span><strong>${fmtMoney(regFee)}</strong></p>`
+        :`<p style="font-size:11px;color:var(--accent-green)">No registration fee - returning client (${(prevLoans||[]).length} previous loan${(prevLoans||[]).length!==1?'s':''})</p>`}
       <hr style="border:none;border-top:1px solid var(--border);margin:6px 0">
-      <p style="display:flex;justify-content:space-between;font-size:15px"><span><strong>Net Disbursement</strong></span><strong style="color:var(--accent-green)">${fmtMoney(amt)}</strong></p>
-      <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">ℹ️ Fees (KES ${fmtMoney(procFee+regFee)} total) collected in cash upfront. Full principal disbursed to client.</p>
+      <p style="display:flex;justify-content:space-between;font-size:15px"><span><strong>Net Amount Client Receives</strong></span><strong style="color:var(--accent-green)">${fmtMoney(netDisbursement)}</strong></p>
+      <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">Total deductions: ${fmtMoney(procFee+regFee)}. Client repays the full loan amount plus interest.</p>
     </div>
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnConfirmDisburse" onclick="confirmDisburse('${appId}','${app.client_id}','${app.applied_term_weeks}')">Confirm & Disburse</button></div>
   `,true);
@@ -2969,6 +3002,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
     const{data:prevLoans}=await sb('loans').select('id,loan_officer_id,created_at').eq('client_id',clientId).eq('business_id',currentUser?.business_id).order('created_at',{ascending:false}).limit(2);
     const isReturningClient=(prevLoans&&prevLoans.length>0);
     const regFee=isReturningClient?0:REGISTRATION_FEE;
+    const netDisbursement=Math.max(0, amt-procFee-regFee);
     const disbDate=$('#dDate').value;const firstRep=$('#dFirstRep').value;
     const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(term-1)*7);
 
@@ -2989,8 +3023,8 @@ async function confirmDisburse(appId,clientId,termWeeks){
     } else if(isReturningClient && prevLoans[0]?.loan_officer_id){
       disbOfficerId = prevLoans[0].loan_officer_id;
     }
-    // Fees are collected upfront in cash — disbursed_amount equals the full principal
-    const loanRec={loan_no:loanNo,application_id:appId,client_id:clientId,loan_officer_id:disbOfficerId,principal_amount:amt,interest_rate:rate,interest_type:'flat',term_weeks:term,processing_fee:procFee,total_interest:c.totalInterest,total_payable:c.totalPayable,weekly_installment:c.weekly,disbursed_amount:amt,disbursement_method:$('#dMethod').value,disbursement_reference:$('#dRef').value,disbursement_date:disbDate,first_repayment_date:firstRep,maturity_date:localISODate(maturity),status:'active',outstanding_balance:c.totalPayable,total_paid:0,arrears_amount:0,overdue_days:0,business_id:currentUser?.business_id,loan_type:disbLoanType};
+    // Fees are deducted from the amount released to the client, but repayment is based on the full loan amount plus interest.
+    const loanRec={loan_no:loanNo,application_id:appId,client_id:clientId,loan_officer_id:disbOfficerId,principal_amount:amt,interest_rate:rate,interest_type:'flat',term_weeks:term,processing_fee:procFee,total_interest:c.totalInterest,total_payable:c.totalPayable,weekly_installment:c.weekly,disbursed_amount:netDisbursement,disbursement_method:$('#dMethod').value,disbursement_reference:$('#dRef').value,disbursement_date:disbDate,first_repayment_date:firstRep,maturity_date:localISODate(maturity),status:'active',outstanding_balance:c.totalPayable,total_paid:0,arrears_amount:0,overdue_days:0,business_id:currentUser?.business_id,loan_type:disbLoanType};
 
     // Guard: if loan_type column doesn't exist yet in DB, retry without it
     let{data:loan,error:lErr}=await sb('loans').insert(loanRec).select().single();
@@ -3015,7 +3049,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
 
     await sb('loan_applications').update({status:'disbursed'}).eq('id',appId);
 
-    // Log processing fee as upfront cash income (mirrors recordRegistrationFeeIncome)
+    // Log processing fee as deducted income.
     try{
       const feeRcpt=(appSettings?.receipt_no_prefix||'RCP')+'-PF-'+Date.now().toString().slice(-8);
       await sb('journal_entries').insert({
@@ -3023,13 +3057,30 @@ async function confirmDisburse(appId,clientId,termWeeks){
         business_id:currentUser?.business_id,
         date:disbDate,
         ref:feeRcpt,
-        description:`Processing fee (upfront cash) — Loan ${loanNo}`,
-        debit:'Cash',
+        description:`Processing fee deducted - Loan ${loanNo}`,
+        debit:'Loan Disbursement',
         credit:'Processing Fee Income',
         amount:procFee,
         synced:false
       });
     }catch(feeErr){ console.warn('[Disburse] Processing fee income log failed:',feeErr?.message); }
+
+    if(regFee>0){
+      try{
+        const regRcpt=(appSettings?.receipt_no_prefix||'RCP')+'-RF-'+Date.now().toString().slice(-8);
+        await sb('journal_entries').insert({
+          id:crypto.randomUUID(),
+          business_id:currentUser?.business_id,
+          date:disbDate,
+          ref:regRcpt,
+          description:`Registration fee deducted - Loan ${loanNo}`,
+          debit:'Loan Disbursement',
+          credit:'Registration Fee Income',
+          amount:regFee,
+          synced:false
+        });
+      }catch(regErr){ console.warn('[Disburse] Registration fee income log failed:',regErr?.message); }
+    }
 
     await audit('loan_disbursed','loans',loan.id,null,loanRec);
     toast(`Loan ${loanNo} disbursed successfully!`,'success');closeModal();renderDisbursement();
@@ -3159,7 +3210,7 @@ async function viewLoan(id){
       <div><strong>Weekly:</strong> ${fmtMoney(loan.weekly_installment)}</div>
       <div><strong>Balance:</strong> <span style="color:var(--accent-yellow)">${fmtMoney(loan.outstanding_balance)}</span></div>
       <div><strong>Total Paid:</strong> <span style="color:var(--accent-green)">${fmtMoney(loan.total_paid)}</span></div>
-      <div><strong>Processing Fee:</strong> <span style="color:var(--accent-blue)">${fmtMoney(loan.processing_fee||0)} paid upfront</span></div>
+      <div><strong>Processing Fee:</strong> <span style="color:var(--accent-blue)">${fmtMoney(loan.processing_fee||0)} deducted</span></div>
       <div><strong>Disbursed:</strong> ${fmtDate(loan.disbursement_date)}</div>
       <div><strong>Maturity:</strong> ${fmtDate(loan.maturity_date)}</div>
       <div><strong>Method:</strong> ${loan.disbursement_method||'-'}</div>
@@ -3375,7 +3426,7 @@ async function viewClientPayments(loanId){
     <div class="card" style="margin-bottom:12px;font-size:12px;background:rgba(217,119,6,0.07);border-color:rgba(217,119,6,0.3)">
       <span style="font-weight:700">Processing Fee: ${fmtMoney(procFee)}</span>
       &nbsp;&nbsp;
-      <span style="color:var(--accent-green);font-weight:700">Paid upfront at disbursement</span>
+      <span style="color:var(--accent-green);font-weight:700">Deducted at disbursement</span>
     </div>`:''}
     <div class="table-wrap">
       <table>
@@ -3512,7 +3563,7 @@ async function renderRepayments(page=1){
           : '<strong style="color:'+balColor+'">'+fmtMoney(balRem)+'</strong>';
         // Processing fee cell — shows the fee amount with "Paid Upfront" tag
         const procCell = procFee > 0
-          ? '<span style="font-size:11px">'+fmtMoney(procFee)+'<br><span style="color:var(--accent-green);font-size:10px">✅ Paid Upfront</span></span>'
+          ? '<span style="font-size:11px">'+fmtMoney(procFee)+'<br><span style="color:var(--accent-green);font-size:10px">Deducted</span></span>'
           : '<span style="color:var(--text-secondary);font-size:11px">—</span>';
         const rid = r.id;
         const rclient = r.loans?.loan_clients?.full_name||'-';
@@ -3974,7 +4025,7 @@ function exportRepaymentsExcel(){
       'Amount (KES)':      Number(r.amount||0),
       'Balance Remaining': balRem<=0?'Cleared':Number(balRem.toFixed(2)),
       'Processing Fee (KES)': procFee>0?Number(procFee.toFixed(2)):'',
-      'Proc Fee Status':   procFee>0?'Paid Upfront':'',
+      'Proc Fee Status':   procFee>0?'Deducted':'',
       'Method':            r.payment_method||'-',
   'Date & Time':       fmtPaymentDateTime(r.payment_date||r.created_at)
     };
@@ -6719,13 +6770,16 @@ async function handleExcelImport(ev){
         const{data:existLoan}=await existQuery.limit(1);
 
         const loanNo=ln.loan_number || `${appSettings?.loan_no_prefix||'LN'}-IMP-${String(i+1).padStart(3,'0')}-${String(loanSeq).padStart(2,'0')}`;
+        const importProcessingFee=processingFeeFor(principal);
+        const importRegistrationFee=loanSeq===1?REGISTRATION_FEE:0;
+        const importDisbursedAmount=disbursed||Math.max(0, principal-importProcessingFee-importRegistrationFee);
 
         const loanRec={
           loan_no:loanNo,
           ...(appId ? {application_id:appId} : {}),
           client_id:clientId,
           principal_amount:principal,
-          disbursed_amount:disbursed||principal,
+          disbursed_amount:importDisbursedAmount,
           total_payable:totalPayable,
           total_paid:totalPaid,
           outstanding_balance:outstanding,
@@ -6736,7 +6790,7 @@ async function handleExcelImport(ev){
           interest_rate:weeklyRate,
           interest_type:'flat',
           term_weeks:termWeeksCalc||0,
-          processing_fee:processingFeeFor(principal),
+          processing_fee:importProcessingFee,
           total_interest:totalInterest,
           weekly_installment:weeklyInstallment,
           arrears_amount:0,
@@ -6878,6 +6932,31 @@ document.addEventListener('keydown',e=>{
 
 // ═══ INIT ═══
 let primeCreditInstallPrompt = null;
+async function refreshPrimeCreditBrowserCache(){
+  if(!location.protocol.startsWith('http')) return false;
+  const versionKey = 'primecredit_app_version';
+  const reloadKey = `primecredit_reloaded_${APP_VERSION}`;
+  try{
+    if(localStorage.getItem(versionKey) === APP_VERSION) return false;
+    localStorage.setItem(versionKey, APP_VERSION);
+    if(window.caches){
+      const keys = await caches.keys();
+      await Promise.all(keys.filter(key => key.toLowerCase().includes('primecredit')).map(key => caches.delete(key)));
+    }
+    if(navigator.serviceWorker?.getRegistrations){
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(reg => reg.unregister()));
+    }
+    if(!sessionStorage.getItem(reloadKey)){
+      sessionStorage.setItem(reloadKey, '1');
+      window.location.reload();
+      return true;
+    }
+  }catch(error){
+    console.warn('PrimeCredit cache refresh skipped:', error);
+  }
+  return false;
+}
 function setInstallButtonsVisible(show){
   document.querySelectorAll('[data-install-app]').forEach(button=>button.style.display=show?'inline-flex':'none');
 }
@@ -6906,6 +6985,7 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
 }
 
 (async()=>{
+  if(await refreshPrimeCreditBrowserCache()) return;
   setupMobileProtections();
   keepSupabaseAlive();
   const loggedIn=await checkAuthSession();
