@@ -190,6 +190,15 @@ tr:hover{background:rgba(37,99,235,.04)}
 .client-asset-photo{position:relative;aspect-ratio:4/3;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--bg-dark)}
 .client-asset-photo img{width:100%;height:100%;object-fit:cover;display:block}
 .client-asset-photo button{position:absolute;right:5px;top:5px;background:rgba(15,23,42,.88);color:#fff;border:0;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:10px}
+.row-action-menu{position:relative;display:inline-flex;justify-content:flex-end}
+.row-action-toggle{width:30px;height:28px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-primary);border-radius:7px;cursor:pointer;font-size:16px;line-height:1;font-weight:800}
+.row-action-toggle:hover{border-color:var(--accent-blue);color:var(--accent-blue)}
+.row-action-panel{display:none;position:absolute;right:0;top:32px;z-index:50;min-width:155px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;box-shadow:0 12px 30px rgba(15,23,42,.18);padding:5px}
+.row-action-menu.open .row-action-panel{display:block}
+.row-action-panel button{width:100%;display:block;text-align:left;border:0;background:transparent;color:var(--text-primary);padding:7px 9px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer}
+.row-action-panel button:hover{background:rgba(37,99,235,.08)}
+.row-action-panel button.danger{color:var(--accent-red)}
+.row-action-panel button.success{color:var(--accent-green)}
 .photo-crop-wrap{display:grid;grid-template-columns:280px 1fr;gap:16px;align-items:start}
 .photo-crop-canvas{width:280px;height:280px;border-radius:50%;border:1px solid var(--border);background:var(--bg-dark);display:block}
 .photo-crop-help{font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px}
@@ -2586,7 +2595,11 @@ async function renderApplications(page=1){
 }
 
 function renderAppRows(apps){
-  return apps.map(a=>`<tr>
+  return apps.map(a=>{
+    const menuId=`appActions_${String(a.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
+    const canManage=canManagePendingApplication(a);
+    const canApprove=a.status==='submitted'&&hasRole('admin','branch_manager');
+    return `<tr>
     <td><strong>${a.application_no||'DRAFT'}</strong></td>
     <td><strong>${a.loan_clients?.full_name||'—'}</strong></td>
     <td>${a.loan_clients?.phone||'-'}</td>
@@ -2594,15 +2607,34 @@ function renderAppRows(apps){
     <td><span class="badge badge-blue">${getAutoTier(a.applied_amount)}</span></td>
     <td>${statusBadge(a.status)}</td><td>${fmtDate(a.created_at)}</td>
     <td>
-      <button class="btn btn-outline btn-sm" onclick="viewApplication('${a.id}')">View / Photos</button>
-      ${canManagePendingApplication(a)?`<button class="btn btn-outline btn-sm" onclick="editApplication('${a.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteApplication('${a.id}')">Delete</button>`:''}
-      ${a.status==='submitted'&&hasRole('admin','branch_manager')?`<button class="btn btn-success btn-sm" onclick="approveApp('${a.id}')">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectApp('${a.id}')">Reject</button>`:''}
-    </td></tr>`).join('');
+      <div class="row-action-menu" id="${menuId}">
+        <button class="row-action-toggle" type="button" aria-label="Application actions" onclick="toggleRowActionMenu('${menuId}',event)">...</button>
+        <div class="row-action-panel">
+          <button type="button" onclick="closeRowActionMenus();viewApplication('${a.id}')">View / Photos</button>
+          ${canManage?`<button type="button" onclick="closeRowActionMenus();editApplication('${a.id}')">Edit Application</button><button type="button" class="danger" onclick="closeRowActionMenus();deleteApplication('${a.id}')">Delete Application</button>`:''}
+          ${canApprove?`<button type="button" class="success" onclick="closeRowActionMenus();approveApp('${a.id}')">Approve</button><button type="button" class="danger" onclick="closeRowActionMenus();rejectApp('${a.id}')">Reject</button>`:''}
+        </div>
+      </div>
+    </td></tr>`;
+  }).join('');
 }
 
 function canManagePendingApplication(a){
   if(!a || a.status!=='submitted') return false;
   return hasRole('admin','branch_manager') || (hasRole('loan_officer') && a.loan_officer_id === currentUser?.id);
+}
+
+function closeRowActionMenus(){
+  document.querySelectorAll('.row-action-menu.open').forEach(menu=>menu.classList.remove('open'));
+}
+
+function toggleRowActionMenu(id,event){
+  if(event)event.stopPropagation();
+  const menu=document.getElementById(id);
+  if(!menu)return;
+  const wasOpen=menu.classList.contains('open');
+  closeRowActionMenus();
+  if(!wasOpen)menu.classList.add('open');
 }
 
 function filterApps(q){q=(q||'').toLowerCase();const f=(cachedData.applications||[]).filter(a=>(a.application_no||'').toLowerCase().includes(q)||(a.loan_clients?.full_name||'').toLowerCase().includes(q)||(a.loan_clients?.phone||'').toLowerCase().includes(q)||(a.loan_clients?.id_number||'').toLowerCase().includes(q));$('#appsBody').innerHTML=renderAppRows(f)}
@@ -6891,7 +6923,7 @@ async function handleExcelImport(ev){
 // ═══ KEYBOARD SHORTCUTS ═══
 document.addEventListener('keydown',e=>{
   if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT')return;
-  if(e.key==='Escape')closeModal();
+  if(e.key==='Escape'){closeRowActionMenus();closeModal();}
   if(e.key==='r'||e.key==='R')navigateTo(currentSection);
   if(e.key==='s'||e.key==='S'){e.preventDefault();const s=$('.search-bar .input');if(s)s.focus()}
   if(e.key==='n'||e.key==='N'){
@@ -6903,6 +6935,10 @@ document.addEventListener('keydown',e=>{
 });
 
 // ═══ INIT ═══
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.row-action-menu'))closeRowActionMenus();
+});
+
 let primeCreditInstallPrompt = null;
 function setInstallButtonsVisible(show){
   document.querySelectorAll('[data-install-app]').forEach(button=>button.style.display=show?'inline-flex':'none');
