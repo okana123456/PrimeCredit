@@ -12,7 +12,10 @@ as $$
   select exists (
     select 1
     from public.loan_staff s
-    where s.auth_user_id = auth.uid()
+    where (
+        s.auth_user_id = auth.uid()
+        or lower(trim(s.email)) = lower(trim(coalesce(auth.jwt() ->> 'email', '')))
+      )
       and s.is_active = true
       and s.business_id = target_business_id
   );
@@ -32,7 +35,10 @@ set search_path = public
 as $$
   select business_id
   from public.loan_staff
-  where auth_user_id = auth.uid()
+  where (
+      auth_user_id = auth.uid()
+      or lower(trim(email)) = lower(trim(coalesce(auth.jwt() ->> 'email', '')))
+    )
     and is_active = true
   order by last_login desc nulls last, created_at desc
   limit 1;
@@ -47,6 +53,7 @@ create policy primecredit_staff_select on public.loan_staff
 for select to authenticated
 using (
   auth_user_id = auth.uid()
+  or lower(trim(email)) = lower(trim(coalesce(auth.jwt() ->> 'email', '')))
   or public.primecredit_can_access_business(business_id)
 );
 
@@ -60,6 +67,7 @@ create policy primecredit_staff_update on public.loan_staff
 for update to authenticated
 using (
   auth_user_id = auth.uid()
+  or lower(trim(email)) = lower(trim(coalesce(auth.jwt() ->> 'email', '')))
   or public.primecredit_can_access_business(business_id)
 )
 with check (public.primecredit_can_access_business(business_id));
