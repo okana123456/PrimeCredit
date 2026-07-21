@@ -7,7 +7,6 @@
 <meta name="description" content="PrimeCredit - Complete loan management system for responsible lending, client accounts, repayments and portfolio reporting.">
 <meta name="theme-color" content="#0f5c4a">
 <meta name="application-name" content="PrimeCredit">
-<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="PrimeCredit">
@@ -208,10 +207,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 .sidebar{transform:translateX(-100%);width:200px}
 .sidebar.open{transform:translateX(0)}
 .main-content{margin-left:0;padding:8px;padding-top:48px}
-.hamburger{display:block;left:auto;right:12px;top:12px;width:44px;height:44px;padding:0;font-size:22px;border-radius:10px;box-shadow:0 8px 20px rgba(0,0,0,.12)}
-.sidebar.open~.main-content{filter:none}
-.sidebar.open .sidebar-header{padding-top:18px}
-.sidebar-header{padding-right:54px}
+.hamburger{display:block}
 .form-row{grid-template-columns:1fr}
 .kpi-grid{grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:10px}
 .dash-grid-3,.dash-grid-2{grid-template-columns:1fr;gap:6px}
@@ -359,7 +355,6 @@ tr:hover{background:rgba(37,99,235,.04)}
 // ═══ SUPABASE INIT ═══
 const SUPABASE_URL = 'https://ahzdlgsdpmltrlhbervv.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFoemRsZ3NkcG1sdHJsaGJlcnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNDc3MjIsImV4cCI6MjA5OTgyMzcyMn0.Exj4iqLayPtQQHk1y7ZWQAT8i93fsRjz1Kwe_2mNtFU';
-const APP_VERSION = 'primecredit-2026-07-20-cache-v4';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
     auth: { storageKey: 'primecredit-main-auth-v1' }
@@ -370,91 +365,14 @@ const adminAuthClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY,
 });
 let sb = (table) => supabaseClient.from(table);
 
-async function choosePrimeCreditStaffRecord(records, authUser=null){
-  const seen = new Set();
-  const candidates = (records||[])
-    .filter(Boolean)
-    .filter(s=>s.is_active!==false)
-    .filter(s=>{
-      const key = s.id || `${s.business_id||''}:${String(s.email||'').toLowerCase()}`;
-      if(seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  if(!candidates.length) return (records||[])[0] || null;
-
-  // Browser storage is useful as a migration hint, but the selected workspace is
-  // also saved in Supabase Auth metadata so a fresh browser opens the same business.
-  const localPreferredBiz = localStorage.getItem('primecredit_preferred_business_id') || '';
-  const serverPreferredBiz = authUser?.user_metadata?.primecredit_business_id || '';
-  const authUserId = authUser?.id || '';
-
-  async function visibleRowCount(table, businessId){
-    try{
-      const counted = await sb(table).select('id', {count:'exact', head:true}).eq('business_id', businessId);
-      if(!counted.error && Number.isFinite(counted.count)) return counted.count;
-
-      // Some RLS/browser combinations return no HEAD count. Probe actual visible rows
-      // instead of treating the workspace as empty immediately.
-      const probed = await sb(table).select('id').eq('business_id', businessId).limit(25);
-      if(probed.error) return 0;
-      return probed.data?.length || 0;
-    }catch(_){
-      return 0;
-    }
-  }
-
-  const scored = await Promise.all(candidates.map(async staff=>{
-    const [clientsCount, loansCount, appsCount] = await Promise.all([
-      visibleRowCount('loan_clients', staff.business_id),
-      visibleRowCount('loans', staff.business_id),
-      visibleRowCount('loan_applications', staff.business_id)
-    ]);
-    return {
-      staff,
-      localPreferred: !!localPreferredBiz && staff.business_id===localPreferredBiz,
-      serverPreferred: !!serverPreferredBiz && staff.business_id===serverPreferredBiz,
-      exactAuthLink: !!authUserId && staff.auth_user_id===authUserId,
-      dataScore: clientsCount * 10 + loansCount * 20 + appsCount * 8,
-      lastLogin: staff.last_login ? new Date(staff.last_login).getTime() : 0,
-      createdAt: staff.created_at ? new Date(staff.created_at).getTime() : Number.MAX_SAFE_INTEGER
-    };
-  }));
-
-  scored.sort((a,b)=>{
-    // A populated business must beat an empty duplicate, even when an older browser
-    // saved the empty business locally. Preferences only resolve otherwise equal data.
-    if(a.dataScore!==b.dataScore) return b.dataScore-a.dataScore;
-    if(a.localPreferred!==b.localPreferred) return a.localPreferred ? -1 : 1;
-    if(a.serverPreferred!==b.serverPreferred) return a.serverPreferred ? -1 : 1;
-    if(a.exactAuthLink!==b.exactAuthLink) return a.exactAuthLink ? -1 : 1;
-    if(a.lastLogin!==b.lastLogin) return b.lastLogin-a.lastLogin;
-    return a.createdAt-b.createdAt; // Prefer the original membership over a newer empty duplicate.
-  });
-
-  const chosen = scored[0]?.staff || candidates[0];
-  if(chosen?.business_id){
-    localStorage.setItem('primecredit_preferred_business_id', chosen.business_id);
-    if(authUser?.id && serverPreferredBiz!==chosen.business_id){
-      try{
-        await supabaseClient.auth.updateUser({data:{primecredit_business_id:chosen.business_id}});
-      }catch(error){
-        console.warn('Could not sync preferred PrimeCredit business:', error);
-      }
-    }
-  }
-  return chosen;
-}
-
 // ═══ STATE ═══
 let currentUser = null;
-let emailLoginInProgress = false;
 let currentSection = 'dashboard';
 let cachedData = {};
 let charts = {};
 let appSettings = null; 
 let serviceBilling = { status:'unknown', paid:false, locked:false, reminder:false, pending:false, cycleMonth:null, checkedAt:null };
-const SERVICE_BILLING_AMOUNT = 3000;
+const SERVICE_BILLING_AMOUNT = 2000;
 const SERVICE_BILLING_FIRST_REMINDER_DATE = '2026-08-02';
 const SERVICE_BILLING_REMINDER_DAY = 2;
 const SERVICE_BILLING_LOCK_DAY = 4;
@@ -582,22 +500,6 @@ function filterByDate(data, dateField, filterState) {
 }
 const $$ = (sel) => document.querySelectorAll(sel);
 const fmtMoney = (n) => 'KES ' + Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-function isEmailConfirmationReturn(){
-  const hash = String(window.location.hash || '');
-  const search = String(window.location.search || '');
-  return /type=(signup|email_change|invite)/i.test(hash) || /type=(signup|email_change|invite)/i.test(search);
-}
-async function showSignInAfterEmailConfirmation(){
-  try{ await supabaseClient.auth.signOut(); }catch(e){}
-  currentUser = null;
-  localStorage.removeItem('primecredit_current_user');
-  localStorage.removeItem('primecredit_last_activity');
-  $('#appShell').style.display='none';
-  $('#loginScreen').style.display='flex';
-  switchAuthTab('signin');
-  window.history.replaceState(null, '', window.location.pathname);
-  toast('Email confirmed. Please sign in with your email and password.', 'success');
-}
 function localISODate(d=new Date()){
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
@@ -859,7 +761,7 @@ async function compressedAssetPhoto(file){
   canvas.getContext('2d').drawImage(img,0,0,canvas.width,canvas.height);
   return new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error('Could not prepare asset photo')),'image/jpeg',0.68));
 }
-async function uploadClientAssetPhoto(clientId,input){
+async function uploadClientAssetPhoto(clientId,input,refreshTarget='client',applicationId=''){
   const file=input?.files?.[0];
   if(!file)return;
   try{
@@ -877,11 +779,12 @@ async function uploadClientAssetPhoto(clientId,input){
     const{error:updateError}=await sb('loan_clients').update({asset_photo_paths:next}).eq('id',clientId).eq('business_id',currentUser.business_id);
     if(updateError){ await supabaseClient.storage.from(CLIENT_ASSET_BUCKET).remove([path]).catch(()=>{}); throw updateError; }
     toast('Asset photo saved','success');
-    viewClient(clientId);
+    if(refreshTarget==='application'&&applicationId) viewApplication(applicationId);
+    else viewClient(clientId);
   }catch(e){toast(e.message||'Asset photo upload failed','error');}
   finally{if(input)input.value='';}
 }
-async function removeClientAssetPhoto(clientId,path){
+async function removeClientAssetPhoto(clientId,path,refreshTarget='client',applicationId=''){
   if(!hasRole('admin','branch_manager'))return toast('Admin or manager access required','warning');
   if(!await confirm_('Remove this asset photo?'))return;
   try{
@@ -892,7 +795,8 @@ async function removeClientAssetPhoto(clientId,path){
     if(updateError)throw updateError;
     await supabaseClient.storage.from(CLIENT_ASSET_BUCKET).remove([path]).catch(()=>{});
     toast('Asset photo removed','success');
-    viewClient(clientId);
+    if(refreshTarget==='application'&&applicationId) viewApplication(applicationId);
+    else viewClient(clientId);
   }catch(e){toast(e.message||'Could not remove asset photo','error');}
 }
 
@@ -1116,7 +1020,7 @@ function getAutoRate(amount){
 }
 
 function getAutoTier(amount){
-  return Number(amount)<=5000?'KES 5,000 and below':'Above KES 5,000';
+  return Number(amount)<5000?'Below KES 5,000':'KES 5,000 and above';
 }
 
 // ═══ AUTH — EMAIL + GOOGLE ═══
@@ -1159,29 +1063,35 @@ async function handleEmailLogin(){
   if(!email||!pwd)return toast('Enter your email and password','warning');
   const btn=document.querySelector('#panelSignIn .btn-primary');
   if(btn){btn.disabled=true;btn.textContent='Signing in...';}
-
-  // Keep the saved staff record only as an offline fallback. Online authentication
-  // must remain the source of truth so every browser resolves the same Supabase user.
-  let offlineEntry = null;
-  try{
-    const cachedAuth = JSON.parse(localStorage.getItem('primecredit_offline_auth') || '{}');
-    if(cachedAuth[email] && cachedAuth[email].passwordHash === btoa(pwd)) offlineEntry = cachedAuth[email];
-  }catch(_){}
-
+  
   // Nuke stuck locks right before sign in
   try {
-      for (let i = localStorage.length - 1; i >= 0; i--) {
+      for (let i = 0; i < localStorage.length; i++) {
           const key = localStorage.key(i);
           if (key && key.startsWith('lock:')) localStorage.removeItem(key);
       }
   } catch(e) {}
 
-  emailLoginInProgress = true;
+  // 1. Check Offline Cache First
+  try {
+      const cachedAuthStr = localStorage.getItem('primecredit_offline_auth');
+      if (cachedAuthStr) {
+          const cachedAuth = JSON.parse(cachedAuthStr);
+          if (cachedAuth[email] && cachedAuth[email].passwordHash === btoa(pwd)) {
+              await resolveUserRole(null, cachedAuth[email].staffObj, pwd); 
+              if(btn){btn.disabled=false;btn.textContent='Sign In';}
+              return;
+          }
+      }
+  } catch(e) {}
+
   try{
+    // 2. Supabase Login with Promise.race Timeout (8s)
     const authPromise = supabaseClient.auth.signInWithPassword({email,password:pwd});
     const timeoutPromise = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000));
+    
     const { data, error } = await Promise.race([authPromise, timeoutPromise]);
-
+    
     if(error){
       if(error.message.toLowerCase().includes('email not confirmed')){
         toast('Please confirm your email first. Check your inbox for a confirmation link.','warning');
@@ -1194,20 +1104,13 @@ async function handleEmailLogin(){
     }
     await resolveUserRole(data.user, null, pwd);
   }catch(e){
-    const networkFailure = e.message === 'timeout' || /failed to fetch|network|load failed/i.test(e.message||'');
-    if(networkFailure && offlineEntry?.staffObj){
-      await resolveUserRole(null, offlineEntry.staffObj, pwd);
-      toast('Supabase could not be reached. Signed in using saved offline access.','warning');
-    }else if(e.message === 'timeout'){
-      toast('Network timeout: Could not reach authentication servers and no offline access is saved for this user.','error');
-    }else{
-      toast(e.message,'error');
+    if (e.message === 'timeout') {
+        toast("Network timeout: Could not reach authentication servers. Offline cache unavailable for this user.", "error");
+    } else {
+        toast(e.message,'error');
     }
   }
-  finally{
-    emailLoginInProgress = false;
-    if(btn){btn.disabled=false;btn.textContent='Sign In';}
-  }
+  finally{if(btn){btn.disabled=false;btn.textContent='Sign In';}}
 }
 
 async function handleEmailSignUp(){
@@ -1300,46 +1203,18 @@ async function resolveUserRole(authUser, staffCache = null, pwd = null){
     let staff = staffCache;
     
     if(!staff && authUser){
-        // Find all possible staff records for this login, then choose the active workspace
-        // that actually has business data. This prevents a shared email from opening
-        // an empty test workspace while the real business has clients.
-        const matchedStaff = [];
-        let { data: staffData } = await sb('loan_staff').select('*').eq('auth_user_id', authUser.id).order('created_at',{ascending:false});
-        if(staffData?.length) matchedStaff.push(...staffData);
-
-        if(authUser.email){
-          const { data: byEmailData } = await sb('loan_staff').select('*').ilike('email', authUser.email).order('created_at',{ascending:false});
-          if(byEmailData?.length) byEmailData.forEach(row=>{
-            if(!matchedStaff.some(existing=>existing.id===row.id)) matchedStaff.push(row);
-          });
+        // 1. Try to find by exact auth_user_id first
+        let { data: staffData } = await sb('loan_staff').select('*').eq('auth_user_id', authUser.id).limit(1);
+        if (staffData && staffData.length > 0) {
+            staff = staffData[0];
         }
 
-        if(matchedStaff.length){
-          // Normalize every membership carrying this verified login email before probing
-          // business data. This lets RLS recognise the same user in a fresh browser and
-          // prevents an unlinked real workspace from looking empty during selection.
-          if(authUser.id && authUser.email){
-            const sameEmail = String(authUser.email).trim().toLowerCase();
-            const toLink = matchedStaff.filter(row=>
-              row?.id &&
-              String(row.email||'').trim().toLowerCase()===sameEmail &&
-              row.auth_user_id!==authUser.id
-            );
-            if(toLink.length){
-              const linkResults = await Promise.allSettled(toLink.map(row=>
-                sb('loan_staff')
-                  .update({auth_user_id:authUser.id})
-                  .eq('id',row.id)
-                  .ilike('email',authUser.email)
-              ));
-              linkResults.forEach((result,index)=>{
-                if(result.status==='fulfilled' && !result.value?.error) toLink[index].auth_user_id=authUser.id;
-              });
-            }
-          }
-
-          staff = await choosePrimeCreditStaffRecord(matchedStaff, authUser);
-          if(staff && authUser.id){
+        // 2. If not found by ID, try to link by email (case-insensitive)
+        if(!staff && authUser.email){
+          const { data: byEmailData } = await sb('loan_staff').select('*').ilike('email', authUser.email).limit(1);
+          if(byEmailData && byEmailData.length > 0){
+            staff = byEmailData[0];
+            // Link their new auth ID to the pre-created staff record
             await sb('loan_staff').update({auth_user_id: authUser.id, last_login: new Date().toISOString()}).eq('id', staff.id);
           }
         }
@@ -1394,20 +1269,25 @@ async function resolveUserRole(authUser, staffCache = null, pwd = null){
 }
 
 async function checkAuthSession(){
-  if(isEmailConfirmationReturn()){
-    await showSignInAfterEmailConfirmation();
-    return false;
-  }
   // Honor session timeout up-front
   if(checkSessionTimeout()) return false;
+  const cachedUserStr = localStorage.getItem('primecredit_current_user');
+  if (cachedUserStr) {
+      try {
+          currentUser = JSON.parse(cachedUserStr);
+          touchSession();
+          showApp();
+          // Run background tasks silently
+          loadSettings();
+          applyRolloverPenalties();
+          return true;
+      } catch(e) {}
+  }
+
   const{data:{session}}=await supabaseClient.auth.getSession();
   if(session?.user){
     // DO NOT resolve roles and log them in if doing password recovery
     if (window.location.hash.includes('type=recovery')) {
-        return false;
-    }
-    if (isEmailConfirmationReturn()) {
-        await showSignInAfterEmailConfirmation();
         return false;
     }
     await resolveUserRole(session.user);
@@ -1572,40 +1452,33 @@ async function executeSwitchUser(email) {
     }
 }
 
-supabaseClient.auth.onAuthStateChange((event,session)=>{
-  // Do not await Supabase calls inside this callback. Defer them until the auth
-  // client has released its internal lock, otherwise a fresh-browser login can hang.
-  setTimeout(async()=>{
-    if(event==='SIGNED_IN' && session?.user && isEmailConfirmationReturn()){
-      await showSignInAfterEmailConfirmation();
-      return;
-    }
-    if (event === 'PASSWORD_RECOVERY') {
-      openModal(`
-        <h2>Reset Your Password</h2>
-        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">
-          Please enter a new password for your account.
-        </p>
-        <div class="form-group">
-          <label>New Password (min 6 characters)</label>
-          <input class="input" type="password" id="newResetPassword" placeholder="••••••••">
-        </div>
-        <div class="form-group">
-          <label>Confirm Password</label>
-          <input class="input" type="password" id="confirmResetPassword" placeholder="••••••••">
-        </div>
-        <div class="modal-actions">
-          <button class="btn btn-primary" onclick="submitNewPassword()">Update Password</button>
-        </div>
-      `);
-      window.history.replaceState(null, '', window.location.pathname);
-    }
-    else if(event==='SIGNED_IN'&&session?.user&&!currentUser&&!emailLoginInProgress){
-      if (!window.location.hash.includes('type=recovery')) {
+supabaseClient.auth.onAuthStateChange(async(event,session)=>{
+  if (event === 'PASSWORD_RECOVERY') {
+    openModal(`
+      <h2>Reset Your Password</h2>
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">
+        Please enter a new password for your account.
+      </p>
+      <div class="form-group">
+        <label>New Password (min 6 characters)</label>
+        <input class="input" type="password" id="newResetPassword" placeholder="••••••••">
+      </div>
+      <div class="form-group">
+        <label>Confirm Password</label>
+        <input class="input" type="password" id="confirmResetPassword" placeholder="••••••••">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-primary" onclick="submitNewPassword()">Update Password</button>
+      </div>
+    `);
+    window.history.replaceState(null, '', window.location.pathname);
+  }
+  else if(event==='SIGNED_IN'&&session?.user&&!currentUser){
+    if (!window.location.hash.includes('type=recovery')) {
+        await loadSettings();
         await resolveUserRole(session.user);
-      }
     }
-  },0);
+  }
 });
 
 // ═══ NAVIGATION ═══
@@ -1657,9 +1530,9 @@ function calcLoan(principal,rate,type,weeks){return type==='reducing_balance'?ca
 
 // Registration fee is charged once when a client is onboarded.
 const REGISTRATION_FEE = 500;
-// Processing fee: KES 250 for KES 5,000 and below; KES 500 above KES 5,000.
+// ═══ PROCESSING FEE (flat KES 500 per loan disbursement) ═══
 const PRIME_MONTHLY_INTEREST_RATE = 20;
-function processingFeeFor(amount){ return Number(amount)<=5000 ? 250 : 500; }
+function processingFeeFor(amount){ return Number(amount)<5000 ? 250 : 500; }
 function regFeeTag(amount, dateISO){ return `[REG_FEE:${amount}:${dateISO}]`; }
 function parseRegFeeFromNotes(notes){
   if(!notes) return null;
@@ -2264,16 +2137,16 @@ async function openAddClientModal(){
     <div class="form-group"><label>Address</label><input class="input" id="cAddress"></div>
     <div class="form-row"><div class="form-group"><label>Occupation</label><input class="input" id="cOccupation"></div><div class="form-group"><label>Employer</label><input class="input" id="cEmployer"></div></div>
     <div class="form-group"><label>Daily Income (KES)</label><input class="input" type="number" id="cIncome" placeholder="e.g. 500"></div>
-    <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)"><strong>Next of Kin Details</strong></div>
-    <div class="form-row"><div class="form-group"><label>Next of Kin Full Name</label><input class="input" id="cNokName"></div><div class="form-group"><label>Next of Kin Phone</label><input class="input" id="cNokPhone"></div></div>
-    <div class="form-group"><label>Next of Kin Relationship</label><input class="input" id="cNokRel" placeholder="e.g. Spouse, Sibling, Friend"></div>
+    <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)">🔒 <strong>Guarantor Details</strong></div>
+    <div class="form-row"><div class="form-group"><label>Guarantor Full Name</label><input class="input" id="cNokName"></div><div class="form-group"><label>Guarantor Phone</label><input class="input" id="cNokPhone"></div></div>
+    <div class="form-group"><label>Guarantor Relationship</label><input class="input" id="cNokRel" placeholder="e.g. Spouse, Sibling, Friend"></div>
     <div class="form-group"><label>Notes</label><textarea class="textarea" id="cNotes"></textarea></div>
     ${officerDropdown}
     <div style="padding:10px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;margin-bottom:12px;font-size:13px;display:flex;justify-content:space-between;align-items:center">
-      <span>A one-time <strong>Registration Fee</strong> will be deducted from the first loan disbursement.</span>
+      <span>A one-time <strong>Registration Fee</strong> will be charged on save and recorded as income.</span>
       <strong style="color:var(--accent-green)">KES \${REGISTRATION_FEE}</strong>
     </div>
-    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnSaveClient" onclick="saveClient()">Save Client</button></div>
+    <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnSaveClient" onclick="saveClient()">Save Client (incl. KES \${REGISTRATION_FEE} fee)</button></div>
   `,true);
 }
 
@@ -2314,7 +2187,8 @@ async function saveClient(){
       if(window._clientOffMap) window._clientOffMap[data.id] = assignedOfficerId;
     }
     await audit('client_created','loan_clients',data.id,null,rec);
-    toast(`Client added. Registration fee of KES ${REGISTRATION_FEE} will be deducted from the first loan.`,'success');closeModal();renderClients();
+    await recordRegistrationFeeIncome(data.id, name, today);
+    toast(`Client added. Registration fee of KES ${REGISTRATION_FEE} recorded as income.`,'success');closeModal();renderClients();
   }catch(e){
     if(btn){ btn.disabled=false; btn.textContent='Save Client'; }
     toast(e.message,'error');
@@ -2600,9 +2474,9 @@ async function exportClientsExcel(){
         'Occupation':c.occupation||'-',
         'Employer':c.employer||'-',
         'Daily Income (KES)':c.monthly_income||0,
-        'Next of Kin Name':c.next_of_kin_name||'-',
-        'Next of Kin Phone':c.next_of_kin_phone||'-',
-        'Next of Kin Relation':c.next_of_kin_relation||'-',
+        'Guarantor Name':c.next_of_kin_name||'-',
+        'Guarantor Phone':c.next_of_kin_phone||'-',
+        'Guarantor Relation':c.next_of_kin_relation||'-',
         'Date Onboarded':c.created_at?c.created_at.slice(0,10):'-',
         'Loan Officer':officerId?staffMap[officerId]||'-':'-',
         'Total Loans':cLoans.length,
@@ -2696,7 +2570,7 @@ let appPage=1;
 async function renderApplications(page=1){
   appPage=page;const main=$('#mainContent');
   try{
-    const{data:apps}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
+    const{data:apps}=await sb('loan_applications').select('*,loan_clients(full_name,phone,id_number,asset_photo_paths)').eq('business_id', currentUser.business_id).order('created_at',{ascending:false});
     cachedData.applications=apps||[];
     const isOnlyOfficer = hasRole('loan_officer') && !hasRole('admin','branch_manager');
     if(isOnlyOfficer) cachedData.applications = cachedData.applications.filter(a => a.loan_officer_id === currentUser.id);
@@ -2720,16 +2594,22 @@ function renderAppRows(apps){
     <td><span class="badge badge-blue">${getAutoTier(a.applied_amount)}</span></td>
     <td>${statusBadge(a.status)}</td><td>${fmtDate(a.created_at)}</td>
     <td>
-      <button class="btn btn-outline btn-sm" onclick="viewApplication('${a.id}')">View</button>
+      <button class="btn btn-outline btn-sm" onclick="viewApplication('${a.id}')">View / Photos</button>
+      ${canManagePendingApplication(a)?`<button class="btn btn-outline btn-sm" onclick="editApplication('${a.id}')">Edit</button><button class="btn btn-danger btn-sm" onclick="deleteApplication('${a.id}')">Delete</button>`:''}
       ${a.status==='submitted'&&hasRole('admin','branch_manager')?`<button class="btn btn-success btn-sm" onclick="approveApp('${a.id}')">Approve</button><button class="btn btn-danger btn-sm" onclick="rejectApp('${a.id}')">Reject</button>`:''}
     </td></tr>`).join('');
+}
+
+function canManagePendingApplication(a){
+  if(!a || a.status!=='submitted') return false;
+  return hasRole('admin','branch_manager') || (hasRole('loan_officer') && a.loan_officer_id === currentUser?.id);
 }
 
 function filterApps(q){q=(q||'').toLowerCase();const f=(cachedData.applications||[]).filter(a=>(a.application_no||'').toLowerCase().includes(q)||(a.loan_clients?.full_name||'').toLowerCase().includes(q)||(a.loan_clients?.phone||'').toLowerCase().includes(q)||(a.loan_clients?.id_number||'').toLowerCase().includes(q));$('#appsBody').innerHTML=renderAppRows(f)}
 function filterAppStatus(v){const f=v?(cachedData.applications||[]).filter(a=>a.status===v):(cachedData.applications||[]);$('#appsBody').innerHTML=renderAppRows(f)}
 
 async function openNewApplication(){
-  const{data:clients}=await sb('loan_clients').select('id,full_name,phone,id_number,photo_path,asset_photo_paths,next_of_kin_name,next_of_kin_phone,next_of_kin_relation').eq('business_id', currentUser.business_id).order('full_name');
+  const{data:clients}=await sb('loan_clients').select('id,full_name,phone,id_number').eq('business_id', currentUser.business_id).order('full_name');
   const{data:products}=await sb('loan_products').select('*').eq('business_id', currentUser.business_id).eq('is_active',true);
   // Build datalist; encode id in option's data-id via a hidden lookup map
   window._appClientLookup = {};
@@ -2752,16 +2632,13 @@ async function openNewApplication(){
         <input type="hidden" id="appClient" value="">
         <div id="appClientPickInfo" style="margin-top:6px;font-size:12px;color:var(--text-secondary)"></div>
       </div>
-      <div id="appClientMediaTools"></div>
+      <p style="font-size:12px;color:var(--text-secondary);margin-top:6px">💡 Guarantor details are collected during client registration.</p>
     </div>
     <div id="appStep2" style="display:none">
       <div class="form-group"><label>Loan Amount *</label><input class="input" type="number" id="appAmount" oninput="appCalcUpdate()" placeholder="Enter amount"></div>
       <div id="appTierInfo" class="card" style="margin:8px 0;font-size:13px;display:none"></div>
       <div class="form-group"><label>Term (weeks) *</label><input class="input" type="number" id="appTerm" oninput="appCalcUpdate()" placeholder="Number of weeks"></div>
       <div class="form-group"><label>Purpose</label><textarea class="textarea" id="appPurpose"></textarea></div>
-      <div style="padding:10px 12px;background:rgba(217,119,6,0.08);border:1px solid rgba(217,119,6,0.25);border-radius:8px;margin:12px 0;font-size:12px;color:var(--text-secondary)"><strong>Guarantor Details</strong><br>These belong to this loan application, not the client registration record.</div>
-      <div class="form-row"><div class="form-group"><label>Guarantor Full Name *</label><input class="input" id="appGuarantorName"></div><div class="form-group"><label>Guarantor Phone *</label><input class="input" id="appGuarantorPhone"></div></div>
-      <div class="form-group"><label>Guarantor Relationship</label><input class="input" id="appGuarantorRelation" placeholder="e.g. Spouse, Sibling, Friend"></div>
       <div id="appCalcResult" class="card" style="margin-top:8px"></div>
     </div>
     <div id="appStep3" style="display:none"><div id="appReview"></div></div>
@@ -2770,36 +2647,11 @@ async function openNewApplication(){
   window._appStep=1;window._appProducts=products||[];window._appClients=clients||[];
 }
 
-function renderApplicationPhotoTools(client){
-  if(!client) return '';
-  const safeId=String(client.id).replace(/[^a-zA-Z0-9_-]/g,'');
-  const profileInputId=`appProfilePhoto_${safeId}`;
-  const assetInputId=`appAssetPhoto_${safeId}`;
-  const assetCount=clientAssetPaths(client).length;
-  const canManageProfile=hasRole('admin','branch_manager') || (hasRole('loan_officer') && !client.photo_path);
-  return `
-    <div class="card" style="margin-top:10px;background:rgba(59,130,246,0.05);border-color:rgba(59,130,246,0.18)">
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        ${clientAvatarHtml(client,false)}
-        <div style="flex:1;min-width:180px">
-          <strong>Photos for this application</strong>
-          <div style="font-size:11px;color:var(--text-secondary)">Profile photo: ${client.photo_path?'uploaded':'not uploaded'} | Asset photos: ${assetCount}</div>
-        </div>
-        ${canManageProfile?`
-          <input id="${profileInputId}" type="file" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="uploadClientPhoto('${client.id}', this, '${escapeHtml(client.photo_path||'')}')">
-          <button class="btn btn-outline btn-sm" onclick="document.getElementById('${profileInputId}').click()">${client.photo_path?'Change profile photo':'Upload profile photo'}</button>
-        `:''}
-        <input id="${assetInputId}" type="file" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="uploadClientAssetPhoto('${client.id}', this)">
-        <button class="btn btn-outline btn-sm" onclick="document.getElementById('${assetInputId}').click()">Add asset photo</button>
-      </div>
-      <div style="font-size:11px;color:var(--text-secondary);margin-top:8px">Photos are compressed before saving so they do not consume much storage.</div>
-    </div>`;
-}
-
 function onAppClientPick(val){
   const map = window._appClientLookup||{};
   let id = map[val] || map[(val||'').toLowerCase()];
   if(!id){
+    // Fuzzy: match any client whose full_name or phone contains val
     const v = (val||'').toLowerCase().trim();
     if(v.length>=2){
       const hit = (window._appClients||[]).find(c=>(c.full_name||'').toLowerCase().includes(v)||(c.phone||'').includes(v));
@@ -2808,17 +2660,14 @@ function onAppClientPick(val){
   }
   document.getElementById('appClient').value = id||'';
   const info = document.getElementById('appClientPickInfo');
-  const media = document.getElementById('appClientMediaTools');
   if(info){
     if(id){
       const c = (window._appClients||[]).find(x=>x.id===id);
-      info.innerHTML = c?`Selected: <strong>${c.full_name}</strong> (${c.phone||'no phone'})`:'';
+      info.innerHTML = c?`✅ Selected: <strong>${c.full_name}</strong> (${c.phone||'no phone'})`:'';
       info.style.color='var(--accent-green)';
-      if(media) media.innerHTML=renderApplicationPhotoTools(c);
     } else {
       info.textContent = val ? 'No client matched. Pick from suggestions.' : '';
       info.style.color='var(--text-secondary)';
-      if(media) media.innerHTML='';
     }
   }
 }
@@ -2832,8 +2681,6 @@ function appStepNav(dir){
     const amt=Number($('#appAmount').value);
     if(!amt||amt<=0)return toast('Enter a valid loan amount','warning');
     if(!$('#appTerm').value)return toast('Enter loan term in weeks','warning');
-    if(!($('#appGuarantorName')?.value||'').trim())return toast('Enter guarantor full name','warning');
-    if(!($('#appGuarantorPhone')?.value||'').trim())return toast('Enter guarantor phone','warning');
     buildAppReview();
   }
   window._appStep=s;
@@ -2876,7 +2723,7 @@ function buildAppReview(){
     <p><strong>Weekly Installment:</strong> ${fmtMoney(calc.weekly)}</p>
     <p><strong>Total Payable:</strong> ${fmtMoney(calc.totalPayable)}</p>
     <p><strong>Processing Fee:</strong> ${fmtMoney(processingFeeFor(amt))}</p>
-    <p><strong>Guarantor:</strong> ${escapeHtml($('#appGuarantorName').value||'-')} (${escapeHtml($('#appGuarantorRelation').value||'-')}) ${escapeHtml($('#appGuarantorPhone').value||'')}</p>
+    <p style="font-size:11px;color:var(--text-secondary)">Guarantor details on file from client registration.</p>
   </div>`;
 }
 
@@ -2927,7 +2774,7 @@ async function submitApplication(){
         appOfficerId = prevLoanCheck[0].loan_officer_id;
       }
     }
-    const rec={application_no:appNo,client_id:selectedClientId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,status:'submitted',loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRelation')?.value||'').trim()};
+    const rec={application_no:appNo,client_id:selectedClientId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,status:'submitted',loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType};
     
     // Robust auto-tier → product mapping (case-insensitive, trims, fallbacks)
     const tier=getAutoTier(amt);
@@ -2942,47 +2789,129 @@ async function submitApplication(){
       // Do NOT add product_id if no match — prevents 400 from unknown column
     }
     // Try with product_id first; if Supabase rejects (column may not exist), retry without
-    let{error}=await sb('loan_applications').insert(rec);
-    if(error && (error.code==='PGRST204' || /product_id|guarantor_|column/.test(error.message||''))){
-      console.warn('A newer application column was not found in DB - retrying with old columns only');
-      const recFallback={...rec};
-      delete recFallback.product_id;
-      delete recFallback.guarantor_name;
-      delete recFallback.guarantor_phone;
-      delete recFallback.guarantor_relationship;
-      const res2=await sb('loan_applications').insert(recFallback);
+    let insertedApp=null;
+    let{data:inserted,error}=await sb('loan_applications').insert(rec).select('id,application_no').single();
+    insertedApp=inserted;
+    if(error && error.code==='PGRST204' || (error && /product_id|column/.test(error.message||''))){
+      console.warn('product_id column not found in DB — retrying without it');
+      const recFallback={...rec}; delete recFallback.product_id;
+      const res2=await sb('loan_applications').insert(recFallback).select('id,application_no').single();
+      insertedApp=res2.data;
       error=res2.error;
     }
     if(error)throw error;
     await audit('application_created','loan_applications',null,null,rec);
-    toast(`Application ${appNo} submitted!`,'success');closeModal();renderApplications();
+    toast(`Application ${appNo} submitted! Add asset photos before approval.`,'success');
+    await renderApplications();
+    if(insertedApp?.id)viewApplication(insertedApp.id);
+    else closeModal();
   }catch(e){
     if(btn){ btn.disabled=false; btn.textContent='Submit Application'; }
     toast(e.message,'error');
   }
 }
 
+function renderApplicationAssetManager(app){
+  const client=app?.loan_clients||{};
+  const photos=clientAssetPaths(client);
+  const clientId=app.client_id||client.id;
+  const inputId=`appAssetInput_${String(app.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
+  const canManage=canManagePendingApplication(app);
+  return `
+    <div class="card" style="margin-top:14px">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap">
+        <div>
+          <strong>Application Asset Photos</strong>
+          <div style="font-size:11px;color:var(--text-secondary);margin-top:2px">Review asset photos before approval. They also remain visible on the client profile.</div>
+        </div>
+        ${canManage?`
+          <input id="${inputId}" type="file" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="uploadClientAssetPhoto('${clientId}',this,'application','${app.id}')">
+          <button class="btn btn-outline btn-sm" onclick="document.getElementById('${inputId}').click()">+ Add asset photo</button>
+        `:''}
+      </div>
+      <div class="client-asset-gallery">
+        ${photos.map((path,index)=>`<div class="client-asset-photo"><img src="${clientAssetUrl(path)}" alt="Asset ${index+1}" loading="lazy">${canManage?`<button onclick="removeClientAssetPhoto('${clientId}','${escapeHtml(path)}','application','${app.id}')">Remove</button>`:''}</div>`).join('')||'<div style="font-size:12px;color:var(--text-secondary);padding:8px 0">No asset photos uploaded for this application yet.</div>'}
+      </div>
+    </div>
+  `;
+}
+
 async function viewApplication(id){
-  const{data:a}=await sb('loan_applications').select('*').eq('id',id).single();
+  const{data:a}=await sb('loan_applications').select('*,loan_clients(id,full_name,phone,id_number,asset_photo_paths)').eq('id',id).eq('business_id',currentUser.business_id).single();
   if(!a)return;
   const rate=getAutoRate(a.applied_amount);const tier=getAutoTier(a.applied_amount);
   openModal(`
     <h2>Application ${a.application_no||'DRAFT'}</h2>
     <div style="margin-bottom:12px">${statusBadge(a.status)} <span class="badge badge-blue">${tier}</span></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
+      <p><strong>Client:</strong> ${escapeHtml(a.loan_clients?.full_name||'-')}</p><p><strong>Phone:</strong> ${escapeHtml(a.loan_clients?.phone||'-')}</p>
       <p><strong>Amount:</strong> ${fmtMoney(a.applied_amount)}</p><p><strong>Rate:</strong> ${PRIME_MONTHLY_INTEREST_RATE}% / month</p>
       <p><strong>Term:</strong> ${a.applied_term_weeks} weeks</p><p><strong>Date:</strong> ${fmtDate(a.created_at)}</p>
       <p><strong>Purpose:</strong> ${a.purpose||'-'}</p>
-      <p><strong>Guarantor:</strong> ${a.guarantor_name||'-'} ${a.guarantor_phone?`(${a.guarantor_phone})`:''}</p>
-      <p><strong>Relationship:</strong> ${a.guarantor_relationship||'-'}</p>
+      <p><strong>Guarantor:</strong> On file from client registration</p>
       ${a.rejection_reason?`<p style="grid-column:1/-1"><strong>Rejection Reason:</strong> <span style="color:var(--accent-red)">${a.rejection_reason}</span></p>`:''}
     </div>
+    ${renderApplicationAssetManager(a)}
     <div class="modal-actions">
+      ${canManagePendingApplication(a)?`<button class="btn btn-outline" onclick="editApplication('${a.id}')">Edit Application</button><button class="btn btn-danger" onclick="deleteApplication('${a.id}')">Delete Application</button>`:''}
       ${a.status==='approved'?`<button class="btn btn-primary" onclick="closeModal();navigateTo('disbursement')">Proceed to Disbursement</button>`:''}
       ${a.status==='submitted'&&hasRole('admin','branch_manager')?`<button class="btn btn-success" onclick="approveApp('${a.id}')">Approve</button><button class="btn btn-danger" onclick="rejectApp('${a.id}')">Reject</button>`:''}
       <button class="btn btn-outline" onclick="closeModal()">Close</button>
     </div>
-  `);
+  `,true);
+}
+
+async function editApplication(id){
+  const{data:a,error}=await sb('loan_applications').select('*,loan_clients(full_name,phone)').eq('id',id).eq('business_id',currentUser.business_id).single();
+  if(error||!a)return toast(error?.message||'Application not found','error');
+  if(!canManagePendingApplication(a))return toast('Only pending applications can be edited before approval','warning');
+  openModal(`
+    <h2>Edit Application ${a.application_no||''}</h2>
+    <div class="card" style="margin-bottom:12px;font-size:13px">
+      <strong>${escapeHtml(a.loan_clients?.full_name||'Client')}</strong><br>
+      <span style="color:var(--text-secondary)">${escapeHtml(a.loan_clients?.phone||'')}</span>
+    </div>
+    <div class="form-grid">
+      <div class="form-group"><label>Loan Amount *</label><input class="input" type="number" id="editAppAmount" value="${Number(a.applied_amount||0)}"></div>
+      <div class="form-group"><label>Term (weeks) *</label><input class="input" type="number" id="editAppTerm" value="${Number(a.applied_term_weeks||0)}"></div>
+    </div>
+    <div class="form-group"><label>Purpose</label><textarea class="textarea" id="editAppPurpose">${escapeHtml(a.purpose||'')}</textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" onclick="saveApplicationEdit('${a.id}')">Save changes</button>
+      <button class="btn btn-outline" onclick="viewApplication('${a.id}')">Back</button>
+    </div>
+  `,true);
+}
+
+async function saveApplicationEdit(id){
+  const amount=Number($('#editAppAmount')?.value||0);
+  const term=Number($('#editAppTerm')?.value||0);
+  if(!amount||amount<=0)return toast('Enter a valid loan amount','warning');
+  if(!term||term<=0)return toast('Enter a valid term','warning');
+  try{
+    const rec={applied_amount:amount,applied_term_weeks:term,purpose:$('#editAppPurpose')?.value||'',updated_at:new Date().toISOString()};
+    const{error}=await sb('loan_applications').update(rec).eq('id',id).eq('business_id',currentUser.business_id).eq('status','submitted');
+    if(error)throw error;
+    await audit('application_updated','loan_applications',id,null,rec);
+    toast('Application updated','success');
+    renderApplications(appPage);
+    viewApplication(id);
+  }catch(e){toast(e.message||'Could not update application','error');}
+}
+
+async function deleteApplication(id){
+  const{data:a,error:loadError}=await sb('loan_applications').select('id,status,application_no,loan_officer_id').eq('id',id).eq('business_id',currentUser.business_id).single();
+  if(loadError||!a)return toast(loadError?.message||'Application not found','error');
+  if(!canManagePendingApplication(a))return toast('Only pending applications can be deleted before approval','warning');
+  if(!await confirm_(`Delete application ${a.application_no||''}? This cannot be undone.`))return;
+  try{
+    const{error}=await sb('loan_applications').delete().eq('id',id).eq('business_id',currentUser.business_id).eq('status','submitted');
+    if(error)throw error;
+    await audit('application_deleted','loan_applications',id,a,null);
+    toast('Application deleted','success');
+    closeModal();
+    renderApplications(appPage);
+  }catch(e){toast(e.message||'Could not delete application','error');}
 }
 
 async function approveApp(id){
@@ -3031,7 +2960,7 @@ async function openDisburseModal(appId){
   const{data:prevLoans}=await sb('loans').select('id').eq('client_id',app.client_id).eq('business_id',currentUser?.business_id).limit(2);
   const isReturning=(prevLoans&&prevLoans.length>0);
   const regFee=isReturning?0:REGISTRATION_FEE;
-  const netDisbursement = Math.max(0, Number(amt||0) - procFee - regFee);
+  // Net disbursement = full principal (fees are paid upfront in cash, not deducted)
   const firstRep=new Date();firstRep.setDate(firstRep.getDate()+7);
   const clientName=app.loan_clients?.full_name||'Unknown Client';
   const clientPhone=app.loan_clients?.phone||'';
@@ -3041,18 +2970,18 @@ async function openDisburseModal(appId){
       <p style="font-size:15px;font-weight:700;margin-bottom:4px">👤 ${clientName}</p>
       <p style="color:var(--text-secondary)">${clientPhone} &nbsp;|&nbsp; <strong>Tier:</strong> ${getAutoTier(amt)} | <strong>Rate:</strong> ${PRIME_MONTHLY_INTEREST_RATE}% / month | <strong>Term:</strong> ${app.applied_term_weeks} weeks</p>
     </div>
-    <div class="form-row"><div class="form-group"><label>Loan Amount</label><input class="input" type="number" id="dAmt" value="${amt}"></div><div class="form-group"><label>Disbursement Method</label><select class="select" id="dMethod"><option value="cash">Cash</option><option value="mpesa" selected>M-Pesa</option><option value="bank_transfer">Bank Transfer</option></select></div></div>
+    <div class="form-row"><div class="form-group"><label>Disbursed Amount</label><input class="input" type="number" id="dAmt" value="${amt}"></div><div class="form-group"><label>Disbursement Method</label><select class="select" id="dMethod"><option value="cash">Cash</option><option value="mpesa" selected>M-Pesa</option><option value="bank_transfer">Bank Transfer</option></select></div></div>
     <div class="form-row"><div class="form-group"><label>Reference / Txn Code</label><input class="input" id="dRef"></div><div class="form-group"><label>Disbursement Date</label><input class="input" type="date" id="dDate" value="${today()}"></div></div>
     <div class="form-group"><label>First Repayment Date</label><input class="input" type="date" id="dFirstRep" value="${localISODate(firstRep)}"></div>
     <div class="card" style="margin-top:12px;font-size:13px">
-      <p style="display:flex;justify-content:space-between"><span>Gross Loan Amount</span><strong>${fmtMoney(amt)}</strong></p>
-      <p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Processing Fee - deducted from disbursement</span><strong>${fmtMoney(procFee)}</strong></p>
+      <p style="display:flex;justify-content:space-between"><span>Gross Amount</span><strong>${fmtMoney(amt)}</strong></p>
+      <p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>⚡ Processing Fee — Fees Paid Upfront (Not Deducted)</span><strong>${fmtMoney(procFee)}</strong></p>
       ${regFee>0
-        ?`<p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Registration Fee <span style="font-size:10px">(new client, one-time) - deducted from disbursement</span></span><strong>${fmtMoney(regFee)}</strong></p>`
-        :`<p style="font-size:11px;color:var(--accent-green)">No registration fee - returning client (${(prevLoans||[]).length} previous loan${(prevLoans||[]).length!==1?'s':''})</p>`}
+        ?`<p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>⚡ Registration Fee <span style="font-size:10px">(new client, one-time) — Paid Upfront (Not Deducted)</span></span><strong>${fmtMoney(regFee)}</strong></p>`
+        :`<p style="font-size:11px;color:var(--accent-green)">✅ No registration fee — returning client (${(prevLoans||[]).length} previous loan${(prevLoans||[]).length!==1?'s':''})</p>`}
       <hr style="border:none;border-top:1px solid var(--border);margin:6px 0">
-      <p style="display:flex;justify-content:space-between;font-size:15px"><span><strong>Net Amount Client Receives</strong></span><strong style="color:var(--accent-green)">${fmtMoney(netDisbursement)}</strong></p>
-      <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">Total deductions: ${fmtMoney(procFee+regFee)}. Client repays the full loan amount plus interest.</p>
+      <p style="display:flex;justify-content:space-between;font-size:15px"><span><strong>Net Disbursement</strong></span><strong style="color:var(--accent-green)">${fmtMoney(amt)}</strong></p>
+      <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">ℹ️ Fees (KES ${fmtMoney(procFee+regFee)} total) collected in cash upfront. Full principal disbursed to client.</p>
     </div>
     <div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="btnConfirmDisburse" onclick="confirmDisburse('${appId}','${app.client_id}','${app.applied_term_weeks}')">Confirm & Disburse</button></div>
   `,true);
@@ -3078,7 +3007,6 @@ async function confirmDisburse(appId,clientId,termWeeks){
     const{data:prevLoans}=await sb('loans').select('id,loan_officer_id,created_at').eq('client_id',clientId).eq('business_id',currentUser?.business_id).order('created_at',{ascending:false}).limit(2);
     const isReturningClient=(prevLoans&&prevLoans.length>0);
     const regFee=isReturningClient?0:REGISTRATION_FEE;
-    const netDisbursement=Math.max(0, amt-procFee-regFee);
     const disbDate=$('#dDate').value;const firstRep=$('#dFirstRep').value;
     const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(term-1)*7);
 
@@ -3099,8 +3027,8 @@ async function confirmDisburse(appId,clientId,termWeeks){
     } else if(isReturningClient && prevLoans[0]?.loan_officer_id){
       disbOfficerId = prevLoans[0].loan_officer_id;
     }
-    // Fees are deducted from the amount released to the client, but repayment is based on the full loan amount plus interest.
-    const loanRec={loan_no:loanNo,application_id:appId,client_id:clientId,loan_officer_id:disbOfficerId,principal_amount:amt,interest_rate:rate,interest_type:'flat',term_weeks:term,processing_fee:procFee,total_interest:c.totalInterest,total_payable:c.totalPayable,weekly_installment:c.weekly,disbursed_amount:netDisbursement,disbursement_method:$('#dMethod').value,disbursement_reference:$('#dRef').value,disbursement_date:disbDate,first_repayment_date:firstRep,maturity_date:localISODate(maturity),status:'active',outstanding_balance:c.totalPayable,total_paid:0,arrears_amount:0,overdue_days:0,business_id:currentUser?.business_id,loan_type:disbLoanType};
+    // Fees are collected upfront in cash — disbursed_amount equals the full principal
+    const loanRec={loan_no:loanNo,application_id:appId,client_id:clientId,loan_officer_id:disbOfficerId,principal_amount:amt,interest_rate:rate,interest_type:'flat',term_weeks:term,processing_fee:procFee,total_interest:c.totalInterest,total_payable:c.totalPayable,weekly_installment:c.weekly,disbursed_amount:amt,disbursement_method:$('#dMethod').value,disbursement_reference:$('#dRef').value,disbursement_date:disbDate,first_repayment_date:firstRep,maturity_date:localISODate(maturity),status:'active',outstanding_balance:c.totalPayable,total_paid:0,arrears_amount:0,overdue_days:0,business_id:currentUser?.business_id,loan_type:disbLoanType};
 
     // Guard: if loan_type column doesn't exist yet in DB, retry without it
     let{data:loan,error:lErr}=await sb('loans').insert(loanRec).select().single();
@@ -3125,7 +3053,7 @@ async function confirmDisburse(appId,clientId,termWeeks){
 
     await sb('loan_applications').update({status:'disbursed'}).eq('id',appId);
 
-    // Log processing fee as deducted income.
+    // Log processing fee as upfront cash income (mirrors recordRegistrationFeeIncome)
     try{
       const feeRcpt=(appSettings?.receipt_no_prefix||'RCP')+'-PF-'+Date.now().toString().slice(-8);
       await sb('journal_entries').insert({
@@ -3133,30 +3061,13 @@ async function confirmDisburse(appId,clientId,termWeeks){
         business_id:currentUser?.business_id,
         date:disbDate,
         ref:feeRcpt,
-        description:`Processing fee deducted - Loan ${loanNo}`,
-        debit:'Loan Disbursement',
+        description:`Processing fee (upfront cash) — Loan ${loanNo}`,
+        debit:'Cash',
         credit:'Processing Fee Income',
         amount:procFee,
         synced:false
       });
     }catch(feeErr){ console.warn('[Disburse] Processing fee income log failed:',feeErr?.message); }
-
-    if(regFee>0){
-      try{
-        const regRcpt=(appSettings?.receipt_no_prefix||'RCP')+'-RF-'+Date.now().toString().slice(-8);
-        await sb('journal_entries').insert({
-          id:crypto.randomUUID(),
-          business_id:currentUser?.business_id,
-          date:disbDate,
-          ref:regRcpt,
-          description:`Registration fee deducted - Loan ${loanNo}`,
-          debit:'Loan Disbursement',
-          credit:'Registration Fee Income',
-          amount:regFee,
-          synced:false
-        });
-      }catch(regErr){ console.warn('[Disburse] Registration fee income log failed:',regErr?.message); }
-    }
 
     await audit('loan_disbursed','loans',loan.id,null,loanRec);
     toast(`Loan ${loanNo} disbursed successfully!`,'success');closeModal();renderDisbursement();
@@ -3286,7 +3197,7 @@ async function viewLoan(id){
       <div><strong>Weekly:</strong> ${fmtMoney(loan.weekly_installment)}</div>
       <div><strong>Balance:</strong> <span style="color:var(--accent-yellow)">${fmtMoney(loan.outstanding_balance)}</span></div>
       <div><strong>Total Paid:</strong> <span style="color:var(--accent-green)">${fmtMoney(loan.total_paid)}</span></div>
-      <div><strong>Processing Fee:</strong> <span style="color:var(--accent-blue)">${fmtMoney(loan.processing_fee||0)} deducted</span></div>
+      <div><strong>Processing Fee:</strong> <span style="color:var(--accent-blue)">${fmtMoney(loan.processing_fee||0)} paid upfront</span></div>
       <div><strong>Disbursed:</strong> ${fmtDate(loan.disbursement_date)}</div>
       <div><strong>Maturity:</strong> ${fmtDate(loan.maturity_date)}</div>
       <div><strong>Method:</strong> ${loan.disbursement_method||'-'}</div>
@@ -3502,7 +3413,7 @@ async function viewClientPayments(loanId){
     <div class="card" style="margin-bottom:12px;font-size:12px;background:rgba(217,119,6,0.07);border-color:rgba(217,119,6,0.3)">
       <span style="font-weight:700">Processing Fee: ${fmtMoney(procFee)}</span>
       &nbsp;&nbsp;
-      <span style="color:var(--accent-green);font-weight:700">Deducted at disbursement</span>
+      <span style="color:var(--accent-green);font-weight:700">Paid upfront at disbursement</span>
     </div>`:''}
     <div class="table-wrap">
       <table>
@@ -3639,7 +3550,7 @@ async function renderRepayments(page=1){
           : '<strong style="color:'+balColor+'">'+fmtMoney(balRem)+'</strong>';
         // Processing fee cell — shows the fee amount with "Paid Upfront" tag
         const procCell = procFee > 0
-          ? '<span style="font-size:11px">'+fmtMoney(procFee)+'<br><span style="color:var(--accent-green);font-size:10px">Deducted</span></span>'
+          ? '<span style="font-size:11px">'+fmtMoney(procFee)+'<br><span style="color:var(--accent-green);font-size:10px">✅ Paid Upfront</span></span>'
           : '<span style="color:var(--text-secondary);font-size:11px">—</span>';
         const rid = r.id;
         const rclient = r.loans?.loan_clients?.full_name||'-';
@@ -4101,7 +4012,7 @@ function exportRepaymentsExcel(){
       'Amount (KES)':      Number(r.amount||0),
       'Balance Remaining': balRem<=0?'Cleared':Number(balRem.toFixed(2)),
       'Processing Fee (KES)': procFee>0?Number(procFee.toFixed(2)):'',
-      'Proc Fee Status':   procFee>0?'Deducted':'',
+      'Proc Fee Status':   procFee>0?'Paid Upfront':'',
       'Method':            r.payment_method||'-',
   'Date & Time':       fmtPaymentDateTime(r.payment_date||r.created_at)
     };
@@ -4670,9 +4581,9 @@ async function loadReportData(id){
         'Occupation':c.occupation||'-',
         'Employer':c.employer||'-',
         'Daily Income':c.monthly_income||0,
-        'Next of Kin':c.next_of_kin_name||'-',
-        'Next of Kin Phone':c.next_of_kin_phone||'-',
-        'Next of Kin Relation':c.next_of_kin_relation||'-',
+        'Guarantor':c.next_of_kin_name||'-',
+        'Guarantor Phone':c.next_of_kin_phone||'-',
+        'Guarantor Relation':c.next_of_kin_relation||'-',
         'Date Onboarded':c.created_at?c.created_at.slice(0,10):'-',
         'Loan Officer':officerId?staffMap[officerId]||'-':'-',
         'Total Loans':cLoans.length,
@@ -4688,7 +4599,7 @@ async function loadReportData(id){
       {label:'Total Clients',value:filteredClients.length},
       {label:'Active Borrowers',value:rows.filter(r=>r['Status']==='Active Borrower').length},
       {label:'Past Borrowers',value:rows.filter(r=>r['Status']==='Past Borrower').length}
-    ],rows,cols:['Full Name','ID Number','Phone','Alt Phone','Email','Gender','DOB','Address / Location','Occupation','Employer','Daily Income','Next of Kin','Next of Kin Phone','Next of Kin Relation','Date Onboarded','Loan Officer','Total Loans','Active Loans','Latest Loan #','Total Borrowed','Outstanding (KES)','Arrears (KES)','Status']};
+    ],rows,cols:['Full Name','ID Number','Phone','Alt Phone','Email','Gender','DOB','Address / Location','Occupation','Employer','Daily Income','Guarantor','Guarantor Phone','Guarantor Relation','Date Onboarded','Loan Officer','Total Loans','Active Loans','Latest Loan #','Total Borrowed','Outstanding (KES)','Arrears (KES)','Status']};
   }
   if(id==='collection_daily'){
     const todayStr=today();
@@ -5912,7 +5823,7 @@ async function renderAccounting() {
       
       <div class="kpi-grid">
         <div class="kpi-card" style="border-top: 4px solid var(--accent-green)"><div class="kpi-label">Net Profit (Revenue)</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(totalRevenue)}</div><div class="kpi-sub">Registration + Processing + Interest + Penalties</div></div>
-        <div class="kpi-card"><div class="kpi-label">Processing Fees</div><div class="kpi-value">${fmtMoney(processingFees)}</div><div class="kpi-sub">KES 250 up to 5,000; KES 500 above 5,000</div></div>
+        <div class="kpi-card"><div class="kpi-label">Processing Fees</div><div class="kpi-value">${fmtMoney(processingFees)}</div><div class="kpi-sub">KES 250 below 5,000; KES 500 from 5,000</div></div>
         <div class="kpi-card"><div class="kpi-label">Registration Fees</div><div class="kpi-value">${fmtMoney(registrationFees)}</div><div class="kpi-sub">${filteredClients.length} new client(s) × KES ${REGISTRATION_FEE}</div></div>
         <div class="kpi-card"><div class="kpi-label">Interest Collected</div><div class="kpi-value">${fmtMoney(interestCollected)}</div></div>
         <div class="kpi-card"><div class="kpi-label">Penalties Collected</div><div class="kpi-value">${fmtMoney(penaltiesCollected)}</div></div>
@@ -6099,7 +6010,7 @@ function renderCalculator(){
     <div class="card" style="max-width:700px">
       <div class="form-row"><div class="form-group"><label>Loan Amount</label><input class="input" type="number" id="calcAmt" value="10000" oninput="updateCalc()"></div><div class="form-group"><label>Interest Rate (% per month)</label><input class="input" type="number" step="0.01" id="calcRate" value="20" oninput="updateCalc()"></div></div>
       <div class="form-row"><div class="form-group"><label>Term (weeks)</label><input class="input" type="number" id="calcTerm" value="4" oninput="updateCalc()"></div><div class="form-group"><label>Interest Type</label><select class="select" id="calcType" onchange="updateCalc()"><option value="flat">Flat Rate</option><option value="reducing_balance">Reducing Balance</option></select></div></div>
-      <div class="form-group"><label>Processing Fee</label><div class="input" style="background:rgba(37,99,235,.06)">KES 250 for KES 5,000 and below; KES 500 above KES 5,000</div></div>
+      <div class="form-group"><label>Processing Fee</label><div class="input" style="background:rgba(37,99,235,.06)">KES 250 below KES 5,000; KES 500 from KES 5,000 upward</div></div>
       <div class="card" style="margin-top:8px;font-size:13px" id="calcTierDetect"></div>
       <div id="calcResults" style="margin-top:16px"></div>
       <button class="btn btn-outline" style="margin-top:12px" onclick="downloadCalcExcel()">Download Schedule (Excel)</button>
@@ -6149,7 +6060,7 @@ async function renderSettings(){
   const main=$('#mainContent');
   try{
     const settings=await loadSettings();
-    const callbackUrl=SUPABASE_URL+'/functions/v1/primecredit-payment-callback';
+    const callbackUrl=SUPABASE_URL+'/functions/v1/payment-callback';
     main.innerHTML=`
       <div class="page-header"><h1>Settings</h1></div>
       <div class="card" style="max-width:700px;margin-bottom:16px">
@@ -6166,7 +6077,7 @@ async function renderSettings(){
       <div class="card" style="max-width:700px;margin-bottom:16px">
         <h3 style="font-size:16px;margin-bottom:16px">Defaults</h3>
         <div class="form-row"><div class="form-group"><label>Grace Period (days)</label><input class="input" type="number" id="setGrace" value="${settings.default_grace_period||7}"></div><div class="form-group"><label>Late Penalty %</label><input class="input" type="number" id="setPenalty" value="${settings.default_late_penalty_pct||5}"></div></div>
-        <div class="form-group"><label>Processing Fee</label><div class="input" style="background:rgba(59,130,246,0.06);display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong style="color:var(--accent-blue)">KES 250</strong><span style="color:var(--text-secondary);font-size:12px">KES 5,000 and below</span><strong style="color:var(--accent-blue)">KES 500</strong><span style="color:var(--text-secondary);font-size:12px">above KES 5,000</span></div><input type="hidden" id="setFee" value="0"></div>
+        <div class="form-group"><label>Processing Fee</label><div class="input" style="background:rgba(59,130,246,0.06);display:flex;align-items:center;gap:8px;flex-wrap:wrap"><strong style="color:var(--accent-blue)">KES 250</strong><span style="color:var(--text-secondary);font-size:12px">below KES 5,000</span><strong style="color:var(--accent-blue)">KES 500</strong><span style="color:var(--text-secondary);font-size:12px">from KES 5,000 upward</span></div><input type="hidden" id="setFee" value="0"></div>
         <div class="form-group"><label>Default Disbursement Method</label><select class="select" id="setDisbMethod"><option value="cash" ${settings.disbursement_method==='cash'?'selected':''}>Cash (Manual)</option><option value="mpesa" ${(!settings.disbursement_method||settings.disbursement_method==='mpesa')?'selected':''}>M-Pesa</option><option value="bank_transfer" ${settings.disbursement_method==='bank_transfer'?'selected':''}>Bank Transfer</option></select></div>
         <div style="background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.2);border-radius:8px;padding:12px;margin-top:8px">
           <strong style="font-size:13px;color:var(--accent-red)">Rollover Penalty Policy</strong>
@@ -6243,28 +6154,16 @@ async function saveSettings(){
       const saveBtn = document.querySelector('[onclick="saveSettings()"]');
       if(saveBtn){ saveBtn.disabled=true; saveBtn.textContent='Registering with Safaricom...'; }
       try{
-        const { data: sessionData } = await supabaseClient.auth.getSession();
-        const accessToken = sessionData?.session?.access_token;
-        if(!accessToken){
-          alert('Please sign in again before saving Daraja settings.');
-          if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent='Save Settings'; }
-          return;
-        }
         const regResp = await fetch(SUPABASE_URL+'/functions/v1/register-daraja', {
           method:'POST',
-          headers:{'Content-Type':'application/json','Authorization':'Bearer '+accessToken},
+          headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_KEY},
           body: JSON.stringify({ shortcode, consumer_key: consumerKey, consumer_secret: consumerSecret, environment: darajaEnv })
         });
         const regJson = await regResp.json().catch(()=>({}));
         if(!regResp.ok || regJson.error){
-          const regMessage = String(regJson.error || regJson.message || '').toLowerCase();
-          if(regMessage.includes('already registered')){
-            toast('Safaricom URLs are already registered. Daraja settings will still be saved.', 'warning');
-          }else{
-            alert('Failed to register webhook with Safaricom: ' + (regJson.error || regJson.message || regResp.status));
-            if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent='Save Settings'; }
-            return;
-          }
+          alert('Failed to register webhook with Safaricom: ' + (regJson.error || regJson.message || regResp.status));
+          if(saveBtn){ saveBtn.disabled=false; saveBtn.textContent='Save Settings'; }
+          return;
         }
       }catch(regErr){
         alert('Failed to register webhook with Safaricom: ' + regErr.message);
@@ -6846,16 +6745,13 @@ async function handleExcelImport(ev){
         const{data:existLoan}=await existQuery.limit(1);
 
         const loanNo=ln.loan_number || `${appSettings?.loan_no_prefix||'LN'}-IMP-${String(i+1).padStart(3,'0')}-${String(loanSeq).padStart(2,'0')}`;
-        const importProcessingFee=processingFeeFor(principal);
-        const importRegistrationFee=loanSeq===1?REGISTRATION_FEE:0;
-        const importDisbursedAmount=disbursed||Math.max(0, principal-importProcessingFee-importRegistrationFee);
 
         const loanRec={
           loan_no:loanNo,
           ...(appId ? {application_id:appId} : {}),
           client_id:clientId,
           principal_amount:principal,
-          disbursed_amount:importDisbursedAmount,
+          disbursed_amount:disbursed||principal,
           total_payable:totalPayable,
           total_paid:totalPaid,
           outstanding_balance:outstanding,
@@ -6866,7 +6762,7 @@ async function handleExcelImport(ev){
           interest_rate:weeklyRate,
           interest_type:'flat',
           term_weeks:termWeeksCalc||0,
-          processing_fee:importProcessingFee,
+          processing_fee:processingFeeFor(principal),
           total_interest:totalInterest,
           weekly_installment:weeklyInstallment,
           arrears_amount:0,
@@ -7008,31 +6904,6 @@ document.addEventListener('keydown',e=>{
 
 // ═══ INIT ═══
 let primeCreditInstallPrompt = null;
-async function refreshPrimeCreditBrowserCache(){
-  if(!location.protocol.startsWith('http')) return false;
-  const versionKey = 'primecredit_app_version';
-  const reloadKey = `primecredit_reloaded_${APP_VERSION}`;
-  try{
-    if(localStorage.getItem(versionKey) === APP_VERSION) return false;
-    localStorage.setItem(versionKey, APP_VERSION);
-    if(window.caches){
-      const keys = await caches.keys();
-      await Promise.all(keys.filter(key => key.toLowerCase().includes('primecredit')).map(key => caches.delete(key)));
-    }
-    if(navigator.serviceWorker?.getRegistrations){
-      const regs = await navigator.serviceWorker.getRegistrations();
-      await Promise.all(regs.map(reg => reg.unregister()));
-    }
-    if(!sessionStorage.getItem(reloadKey)){
-      sessionStorage.setItem(reloadKey, '1');
-      window.location.reload();
-      return true;
-    }
-  }catch(error){
-    console.warn('PrimeCredit cache refresh skipped:', error);
-  }
-  return false;
-}
 function setInstallButtonsVisible(show){
   document.querySelectorAll('[data-install-app]').forEach(button=>button.style.display=show?'inline-flex':'none');
 }
@@ -7057,11 +6928,10 @@ async function installPrimeCreditApp(){
   setInstallButtonsVisible(false);
 }
 if('serviceWorker' in navigator && location.protocol.startsWith('http')){
-  window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').then(reg=>reg.update()).catch(error=>console.warn('App installation worker:',error)));
+  window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').catch(error=>console.warn('App installation worker:',error)));
 }
 
 (async()=>{
-  if(await refreshPrimeCreditBrowserCache()) return;
   setupMobileProtections();
   keepSupabaseAlive();
   const loggedIn=await checkAuthSession();
