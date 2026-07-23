@@ -1485,7 +1485,8 @@ function buildSidebar() {
 }
 
 function hasRole(...roles){
-    const userRoles = (currentUser?.role || '').split(',');
+    const userRoles = (currentUser?.role || '').split(',').map(role => role.trim().toLowerCase()).filter(Boolean);
+    roles = roles.map(role => String(role).trim().toLowerCase());
     return roles.some(r => userRoles.includes(r));
 }
 
@@ -2703,7 +2704,8 @@ function renderAppRows(apps){
   return apps.map(a=>{
     const menuId=`appActions_${String(a.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
     const canManage=canManagePendingApplication(a);
-    const canApprove=a.status==='submitted'&&hasRole('admin','branch_manager');
+    const appStatus=String(a.status||'').toLowerCase();
+    const canApprove=appStatus==='submitted'&&hasRole('admin','branch_manager');
     return `<tr>
     <td><strong>${a.application_no||'DRAFT'}</strong></td>
     <td><strong>${a.loan_clients?.full_name||'—'}</strong></td>
@@ -2725,7 +2727,8 @@ function renderAppRows(apps){
 }
 
 function canManagePendingApplication(a){
-  if(!a || a.status!=='submitted') return false;
+  const appStatus=String(a?.status||'').toLowerCase();
+  if(!a || ['disbursed','rejected'].includes(appStatus)) return false;
   return hasRole('admin','branch_manager') || (hasRole('loan_officer') && a.loan_officer_id === currentUser?.id);
 }
 
@@ -3006,7 +3009,7 @@ async function viewApplication(id){
 async function editApplication(id){
   const{data:a,error}=await sb('loan_applications').select('*,loan_clients(full_name,phone)').eq('id',id).eq('business_id',currentUser.business_id).single();
   if(error||!a)return toast(error?.message||'Application not found','error');
-  if(!canManagePendingApplication(a))return toast('Only pending applications can be edited before approval','warning');
+  if(!canManagePendingApplication(a))return toast('Only applications not yet disbursed can be edited','warning');
   openModal(`
     <h2>Edit Application ${a.application_no||''}</h2>
     <div class="card" style="margin-bottom:12px;font-size:13px">
@@ -3035,7 +3038,7 @@ async function saveApplicationEdit(id){
   if(!term||term<=0)return toast('Enter a valid term','warning');
   try{
     const rec={applied_amount:amount,applied_term_weeks:term,purpose:$('#editAppPurpose')?.value||'',guarantor_name:($('#editAppGuarantorName')?.value||'').trim(),guarantor_phone:($('#editAppGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#editAppGuarantorRel')?.value||'').trim(),updated_at:new Date().toISOString()};
-    const{error}=await sb('loan_applications').update(rec).eq('id',id).eq('business_id',currentUser.business_id).eq('status','submitted');
+    const{error}=await sb('loan_applications').update(rec).eq('id',id).eq('business_id',currentUser.business_id).not('status','in','(disbursed,rejected)');
     if(error)throw error;
     await audit('application_updated','loan_applications',id,null,rec);
     toast('Application updated','success');
@@ -3047,10 +3050,10 @@ async function saveApplicationEdit(id){
 async function deleteApplication(id){
   const{data:a,error:loadError}=await sb('loan_applications').select('id,status,application_no,loan_officer_id').eq('id',id).eq('business_id',currentUser.business_id).single();
   if(loadError||!a)return toast(loadError?.message||'Application not found','error');
-  if(!canManagePendingApplication(a))return toast('Only pending applications can be deleted before approval','warning');
+  if(!canManagePendingApplication(a))return toast('Only applications not yet disbursed can be deleted','warning');
   if(!await confirm_(`Delete application ${a.application_no||''}? This cannot be undone.`))return;
   try{
-    const{error}=await sb('loan_applications').delete().eq('id',id).eq('business_id',currentUser.business_id).eq('status','submitted');
+    const{error}=await sb('loan_applications').delete().eq('id',id).eq('business_id',currentUser.business_id).not('status','in','(disbursed,rejected)');
     if(error)throw error;
     await audit('application_deleted','loan_applications',id,a,null);
     toast('Application deleted','success');
