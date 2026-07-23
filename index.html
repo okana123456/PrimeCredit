@@ -362,7 +362,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'primecredit-2026-07-23-cache-v6';
+const APP_VERSION = 'primecredit-2026-07-23-cache-v7';
 const SUPABASE_URL = 'https://ahzdlgsdpmltrlhbervv.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFoemRsZ3NkcG1sdHJsaGJlcnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNDc3MjIsImV4cCI6MjA5OTgyMzcyMn0.Exj4iqLayPtQQHk1y7ZWQAT8i93fsRjz1Kwe_2mNtFU';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1655,6 +1655,11 @@ function parseRegFeeFromNotes(notes){
   return { amount: Number(m[1]), date: m[2] };
 }
 function stripRegFeeTag(notes){ return String(notes||'').replace(/\s*\[REG_FEE:[^\]]+\]\s*/g,'').trim(); }
+function registrationFeeForClient(client, previousLoans){
+  const tag = parseRegFeeFromNotes(client?.notes);
+  const hasPreviousLoan = (previousLoans||[]).length > 0;
+  return tag && !hasPreviousLoan ? Number(tag.amount || REGISTRATION_FEE) : 0;
+}
 async function recordRegistrationFeeIncome(clientId, clientName, dateISO){
   // Best-effort: try to insert into a generic income table. Silently ignore if it doesn't exist.
   try{
@@ -3166,15 +3171,14 @@ function applyDisbursementFilters(){
 }
 
 async function openDisburseModal(appId){
-  const{data:app}=await sb('loan_applications').select('*,loan_clients(full_name,phone)').eq('id',appId).single();
+  const{data:app}=await sb('loan_applications').select('*,loan_clients(full_name,phone,notes)').eq('id',appId).single();
   if(!app)return toast('Application not found','error');
   const amt=app.applied_amount;
   const rate=getAutoRate(amt);
   const procFee=processingFeeFor(amt);
-  // Check returning client BEFORE rendering preview so reg fee shows correctly
+  // Registration fee only applies to newly registered clients on their first loan.
   const{data:prevLoans}=await sb('loans').select('id').eq('client_id',app.client_id).eq('business_id',currentUser?.business_id).limit(2);
-  const isReturning=(prevLoans&&prevLoans.length>0);
-  const regFee=isReturning?0:REGISTRATION_FEE;
+  const regFee=registrationFeeForClient(app.loan_clients, prevLoans);
   // Net disbursement is principal less processing fee and first-loan registration fee.
   const netDisbursement=Math.max(0,amt-procFee-regFee);
   const firstRep=new Date();firstRep.setDate(firstRep.getDate()+7);
@@ -3194,7 +3198,7 @@ async function openDisburseModal(appId){
       <p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Processing Fee - deducted from disbursed amount</span><strong>${fmtMoney(procFee)}</strong></p>
       ${regFee>0
         ?`<p style="display:flex;justify-content:space-between;color:var(--accent-yellow)"><span>Registration Fee <span style="font-size:10px">(new client, one-time) - deducted from disbursed amount</span></span><strong>${fmtMoney(regFee)}</strong></p>`
-        :`<p style="font-size:11px;color:var(--accent-green)">✅ No registration fee — returning client (${(prevLoans||[]).length} previous loan${(prevLoans||[]).length!==1?'s':''})</p>`}
+        :`<p style="font-size:11px;color:var(--accent-green)">No registration fee - applies only to newly registered clients on their first loan</p>`}
       <hr style="border:none;border-top:1px solid var(--border);margin:6px 0">
       <p style="display:flex;justify-content:space-between;font-size:15px"><span><strong>Net Disbursement</strong></span><strong style="color:var(--accent-green)">${fmtMoney(netDisbursement)}</strong></p>
       <p style="font-size:10px;color:var(--text-secondary);margin-top:4px">Fees totaling ${fmtMoney(procFee+regFee)} are deducted from the approved loan amount before funds are released.</p>
@@ -3219,10 +3223,11 @@ async function confirmDisburse(appId,clientId,termWeeks){
     const rate=getAutoRate(amt);
     const c=calcLoan(amt,rate,'flat',term);
     const procFee=processingFeeFor(amt);
-    // Check if this client already has a previous loan — registration is one-time only
+    // Registration fee only applies to newly registered clients on their first loan.
     const{data:prevLoans}=await sb('loans').select('id,loan_officer_id,created_at').eq('client_id',clientId).eq('business_id',currentUser?.business_id).order('created_at',{ascending:false}).limit(2);
+    const{data:feeClient}=await sb('loan_clients').select('notes').eq('id',clientId).eq('business_id',currentUser?.business_id).single();
     const isReturningClient=(prevLoans&&prevLoans.length>0);
-    const regFee=isReturningClient?0:REGISTRATION_FEE;
+    const regFee=registrationFeeForClient(feeClient, prevLoans);
     const netDisbursement=Math.max(0,amt-procFee-regFee);
     const disbDate=$('#dDate').value;const firstRep=$('#dFirstRep').value;
     const maturity=parseLocalDate(firstRep);maturity.setDate(maturity.getDate()+(term-1)*7);
