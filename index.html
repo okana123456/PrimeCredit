@@ -1783,7 +1783,7 @@ if(lbl) lbl.textContent = isToday ? `— Today, ${fmtLongDate(dateStr)}` : isFut
   const cards = document.getElementById('dueSummaryCards');
   if(cards) cards.innerHTML =
     '<div class="kpi-card" style="border-top:2px solid var(--accent-green)">' +
-      '<div class="kpi-label">Total Due</div>' +
+      '<div class="kpi-label">' + (isToday ? 'Expected Today' : isFuture ? 'Expected on Date' : 'Expected on Date') + '</div>' +
       '<div class="kpi-value" style="color:var(--accent-green)">' + fmtMoney(dueAmt) + '</div>' +
       '<div class="kpi-sub">' + scheds2.length + ' installment' + (scheds2.length!==1?'s':'') + ' · ' + dueLoanIds.size + ' client' + (dueLoanIds.size!==1?'s':'') + '</div>' +
     '</div>' +
@@ -1835,12 +1835,12 @@ async function renderDashboard(){
 
     // Client counts
     const totalClients = allClients.length;
-    const activeClientIds = new Set(allLoans.filter(l=>l.status==='active').map(l=>l.client_id));
+    const activeClientIds = new Set(allLoans.filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01).map(l=>l.client_id));
     const activeClients = activeClientIds.size;
     const newClientsPeriod = filteredClients.length;
 
     // Active loan IDs only — used to filter schedules throughout
-    const activeLoanIdSet = new Set(allLoans.filter(l=>l.status==='active').map(l=>l.id));
+    const activeLoanIdSet = new Set(allLoans.filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01).map(l=>l.id));
 
     // ── DAILY COLLECTION (schedules due TODAY vs payments received TODAY) ──
     // Filter to active loans only before any KPI calculation
@@ -1892,9 +1892,9 @@ async function renderDashboard(){
     // 1. Currently has overdue_days > 0 or arrears_amount > 0, OR
     // 2. Has any past-due schedule that is partial/overdue/pending with unpaid balance
     // This ensures payments on arrears loans count even after partial payment reduces overdue_days
-    const arrearsActiveLoanIdSet = new Set(allLoans.filter(l=>l.status==='active').map(l=>l.id));
+    const arrearsActiveLoanIdSet = new Set(allLoans.filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01).map(l=>l.id));
     const currentlyOverdueIds = new Set(
-      allLoans.filter(l=>l.status==='active'&&(l.overdue_days>0||l.arrears_amount>0)).map(l=>l.id)
+      allLoans.filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01&&(l.overdue_days>0||l.arrears_amount>0)).map(l=>l.id)
     );
     const hasOverdueSchedule = new Set(
       (allScheds||[])
@@ -1948,9 +1948,9 @@ async function renderDashboard(){
       <!-- Summary KPI cards for selected date -->
       <div class="dash-grid-3" id="dueSummaryCards">
         <div class="kpi-card" style="border-top:2px solid var(--accent-green)">
-          <div class="kpi-label">Total Due</div>
+          <div class="kpi-label">Expected Today</div>
           <div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(dailyDueAmt)}</div>
-          <div class="kpi-sub">${dailyDueScheds.length} installment${dailyDueScheds.length!==1?'s':''} · ${new Set(dailyDueScheds.map(s=>s.loan_id)).size} clients</div>
+          <div class="kpi-sub">Admin total for today · ${dailyDueScheds.length} installment${dailyDueScheds.length!==1?'s':''} · ${new Set(dailyDueScheds.map(s=>s.loan_id)).size} clients</div>
         </div>
         <div class="kpi-card" style="border-top:2px solid var(--accent-blue)">
           <div class="kpi-label">Collected</div>
@@ -3308,13 +3308,14 @@ async function renderLoans(page=1){
     if (isOnlyOfficer) finalLoans = finalLoans.filter(l => l.loan_officer_id === currentUser.id);
 
     cachedData.loans = finalLoans;
+    const openActiveLoans = finalLoans.filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01);
     main.innerHTML=`
       <div class="page-header"><h1>Active Loans</h1></div>
       <div class="search-bar">
         <input class="input" id="loanSearchInput" placeholder="Search by loan no, client name, phone or ID..." oninput="filterLoans(this.value)">
         <select class="select" id="loanStatusSelect" onchange="filterLoanStatus(this.value)"><option value="">All Status</option><option value="active">Active</option><option value="completed">Completed</option><option value="defaulted">Defaulted</option><option value="written_off">Written Off</option></select>
         <button class="btn btn-outline btn-sm" onclick="document.getElementById('loanSearchInput').value='';document.getElementById('loanStatusSelect').value='';showAllLoans(false)">Clear</button>
-        <button class="btn btn-primary btn-sm" id="btnViewAllLoans" onclick="showAllLoans(true)">View All Loans (${cachedData.loans.length})</button>
+        <button class="btn btn-primary btn-sm" id="btnViewAllLoans" onclick="showAllLoans(true)">View Active Loans (${openActiveLoans.length})</button>
       </div>
       <div id="loansTableWrap" style="display:none">
         <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Client Name</th><th>Phone</th><th>Officer</th><th>Type</th><th>Principal</th><th>Balance</th><th>Weekly</th><th>Overdue</th><th>Status</th><th>Actions</th></tr></thead>
@@ -3324,7 +3325,7 @@ async function renderLoans(page=1){
       <div id="loansEmptyHint" style="text-align:center;padding:40px 20px;color:var(--text-secondary);background:var(--card);border:1px dashed var(--border);border-radius:10px">
         <div style="font-size:32px;margin-bottom:8px">💰</div>
         <div style="font-size:14px">Type in the search bar above or click <strong>"View All Loans"</strong> to load the list.</div>
-        <div style="font-size:12px;margin-top:4px">${cachedData.loans.length} loan${cachedData.loans.length===1?'':'s'} matching your account.</div>
+        <div style="font-size:12px;margin-top:4px">${openActiveLoans.length} active loan${openActiveLoans.length===1?'':'s'} with balance remaining.</div>
       </div>
     `;
   }catch(e){toast(e.message,'error')}
@@ -3337,7 +3338,8 @@ function showAllLoans(show){
   if(show){
     wrap.style.display='block';
     hint.style.display='none';
-    const p=paginate(cachedData.loans||[],loanPage);
+    const rows=(cachedData.loans||[]).filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01);
+    const p=paginate(rows,loanPage);
     document.getElementById('loansBody').innerHTML=renderLoanRows(p.items);
     document.getElementById('loansPagination').innerHTML=paginationHtml(p,'renderLoans');
   } else {
@@ -3373,7 +3375,8 @@ function filterLoans(q){
     return;
   }
   let f=(cachedData.loans||[]);
-  if(status) f=f.filter(l=>l.status===status);
+  if(status) f=f.filter(l=>l.status===status&&(status!=='active'||Number(l.outstanding_balance||0)>0.01));
+  if(!status) f=f.filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01);
   if(q) f=f.filter(l=>(l.loan_no||'').toLowerCase().includes(q)||(l.loan_clients?.full_name||'').toLowerCase().includes(q)||(l.loan_clients?.phone||'').toLowerCase().includes(q)||(l.loan_clients?.id_number||'').toLowerCase().includes(q));
   if(wrap) wrap.style.display='block';
   if(hint) hint.style.display='none';
@@ -5147,7 +5150,7 @@ async function renderOfficerDashboard(){
     const oReps=allReps.filter(r=>oLoanIds.has(r.loan_id));
     const oScheds=allScheds.filter(s=>oLoanIds.has(s.loan_id));
 
-    const oActive=oLoans.filter(l=>l.status==='active');
+    const oActive=oLoans.filter(l=>l.status==='active'&&Number(l.outstanding_balance||0)>0.01);
     const oClientIds=new Set(oLoans.map(l=>l.client_id));
 
     // New clients this month registered under loans of this officer
@@ -5179,7 +5182,8 @@ async function renderOfficerDashboard(){
       .reduce((s,l)=>s+Number(l.principal_amount||0),0);
 
     // Daily collection rate — dues today vs paid today for this officer's loans
-    const todayDueScheds=oScheds.filter(s=>s.due_date===todayStr);
+    const activeOfficerLoanIds=new Set(oActive.map(l=>l.id));
+    const todayDueScheds=oScheds.filter(s=>s.due_date===todayStr&&activeOfficerLoanIds.has(s.loan_id));
     const dailyDue=todayDueScheds.reduce((s,sc)=>s+Number(sc.total_due||0),0);
     const schedDailyPaid=todayDueScheds.reduce((s,sc)=>s+Number(sc.total_paid||0),0);
     const repsDailyPaid=oReps.filter(r=>(r.payment_date||'').slice(0,10)===todayStr)
@@ -5280,7 +5284,7 @@ async function renderOfficerDashboard(){
           <div class="dash-rate-bar" style="margin-bottom:10px"><div class="dash-rate-fill" style="width:${Math.min(100,dailyRate).toFixed(1)}%;background:${rateColor(dailyRate)}"></div></div>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;text-align:center">
             <div style="background:rgba(255,255,255,0.05);border-radius:6px;padding:6px 4px">
-              <div style="font-size:9px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px">Due Today</div>
+              <div style="font-size:9px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px">Expected Today</div>
               <div style="font-size:13px;font-weight:800;color:var(--text-primary)">${fmtMoney(dailyDue)}</div>
             </div>
             <div style="background:rgba(5,150,105,0.12);border-radius:6px;padding:6px 4px">
