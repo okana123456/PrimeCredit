@@ -362,6 +362,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
+const APP_VERSION = 'primecredit-2026-07-23-cache-v5';
 const SUPABASE_URL = 'https://ahzdlgsdpmltrlhbervv.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFoemRsZ3NkcG1sdHJsaGJlcnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNDc3MjIsImV4cCI6MjA5OTgyMzcyMn0.Exj4iqLayPtQQHk1y7ZWQAT8i93fsRjz1Kwe_2mNtFU';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -381,10 +382,38 @@ let cachedData = {};
 let charts = {};
 let appSettings = null; 
 let serviceBilling = { status:'unknown', paid:false, locked:false, reminder:false, pending:false, cycleMonth:null, checkedAt:null };
+let emailLoginInProgress = false;
 const SERVICE_BILLING_AMOUNT = 2000;
 const SERVICE_BILLING_FIRST_REMINDER_DATE = '2026-08-02';
 const SERVICE_BILLING_REMINDER_DAY = 2;
 const SERVICE_BILLING_LOCK_DAY = 4;
+
+async function refreshPrimeCreditBrowserCache(){
+  const versionKey = 'primecredit_app_version';
+  const reloadKey = 'primecredit_cache_reload_done';
+  try{
+    if(localStorage.getItem(versionKey) === APP_VERSION) return false;
+    if('caches' in window){
+      const keys = await caches.keys();
+      await Promise.all(keys.filter(key => key.startsWith('primecredit-')).map(key => caches.delete(key)));
+    }
+    if('serviceWorker' in navigator){
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(reg => reg.unregister()));
+    }
+    localStorage.setItem(versionKey, APP_VERSION);
+    if(sessionStorage.getItem(reloadKey) !== APP_VERSION){
+      sessionStorage.setItem(reloadKey, APP_VERSION);
+      window.location.reload();
+      return true;
+    }
+    sessionStorage.removeItem(reloadKey);
+  }catch(e){
+    console.warn('PrimeCredit cache refresh skipped:', e);
+    try{ localStorage.setItem(versionKey, APP_VERSION); }catch(_){}
+  }
+  return false;
+}
 
 // ═══ KEEP ALIVE PING ═══
 // Pings Supabase to reset the 7-day pause timer
@@ -1072,6 +1101,7 @@ async function handleEmailLogin(){
   if(!email||!pwd)return toast('Enter your email and password','warning');
   const btn=document.querySelector('#panelSignIn .btn-primary');
   if(btn){btn.disabled=true;btn.textContent='Signing in...';}
+  emailLoginInProgress = true;
   
   // Nuke stuck locks right before sign in
   try {
@@ -1081,21 +1111,8 @@ async function handleEmailLogin(){
       }
   } catch(e) {}
 
-  // 1. Check Offline Cache First
-  try {
-      const cachedAuthStr = localStorage.getItem('primecredit_offline_auth');
-      if (cachedAuthStr) {
-          const cachedAuth = JSON.parse(cachedAuthStr);
-          if (cachedAuth[email] && cachedAuth[email].passwordHash === btoa(pwd)) {
-              await resolveUserRole(null, cachedAuth[email].staffObj, pwd); 
-              if(btn){btn.disabled=false;btn.textContent='Sign In';}
-              return;
-          }
-      }
-  } catch(e) {}
-
   try{
-    // 2. Supabase Login with Promise.race Timeout (8s)
+    // Supabase login must be attempted before any offline fallback.
     const authPromise = supabaseClient.auth.signInWithPassword({email,password:pwd});
     const timeoutPromise = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000));
     
@@ -1113,13 +1130,26 @@ async function handleEmailLogin(){
     }
     await resolveUserRole(data.user, null, pwd);
   }catch(e){
-    if (e.message === 'timeout') {
-        toast("Network timeout: Could not reach authentication servers. Offline cache unavailable for this user.", "error");
+    const networkFailure = e.message === 'timeout' || /network|fetch|failed to fetch|internet|offline/i.test(e.message||'');
+    if(networkFailure){
+      try {
+        const cachedAuthStr = localStorage.getItem('primecredit_offline_auth');
+        const cachedAuth = cachedAuthStr ? JSON.parse(cachedAuthStr) : {};
+        if(cachedAuth[email] && cachedAuth[email].passwordHash === btoa(pwd)){
+          await resolveUserRole(null, cachedAuth[email].staffObj, pwd);
+          toast('Signed in using offline cache. Some live data may need internet to refresh.', 'warning');
+          return;
+        }
+      } catch(_){}
+      toast("Network timeout: Could not reach authentication servers. Offline cache unavailable for this user.", "error");
     } else {
-        toast(e.message,'error');
+      toast(e.message,'error');
     }
   }
-  finally{if(btn){btn.disabled=false;btn.textContent='Sign In';}}
+  finally{
+    emailLoginInProgress = false;
+    if(btn){btn.disabled=false;btn.textContent='Sign In';}
+  }
 }
 
 async function handleEmailSignUp(){
@@ -1206,29 +1236,92 @@ async function submitNewPassword(){
   }catch(e){toast(e.message,'error');}
 }
 
+async function choosePrimeCreditStaffRecord(records, authUser){
+  const activeRecords = (records||[]).filter(row => row && row.is_active !== false && row.business_id);
+  if(!activeRecords.length) return null;
+  const localPreferred = localStorage.getItem('primecredit_preferred_business_id') || '';
+  const serverPreferred = authUser?.user_metadata?.primecredit_business_id || '';
+  const scored = await Promise.all(activeRecords.map(async row => {
+    let dataScore = 0;
+    try{
+      const [clientsR, loansR, appsR] = await Promise.all([
+        sb('loan_clients').select('id', { count:'exact', head:true }).eq('business_id', row.business_id),
+        sb('loans').select('id', { count:'exact', head:true }).eq('business_id', row.business_id),
+        sb('loan_applications').select('id', { count:'exact', head:true }).eq('business_id', row.business_id)
+      ]);
+      if(clientsR.error) console.warn('PrimeCredit client probe error:', clientsR.error.message);
+      if(loansR.error) console.warn('PrimeCredit loan probe error:', loansR.error.message);
+      if(appsR.error) console.warn('PrimeCredit application probe error:', appsR.error.message);
+      dataScore = Number(clientsR.count||0) + Number(loansR.count||0) + Number(appsR.count||0);
+    }catch(e){
+      console.warn('PrimeCredit business data probe failed:', row.business_id, e.message);
+    }
+    return {
+      row,
+      dataScore,
+      localPreferred: !!localPreferred && row.business_id === localPreferred,
+      serverPreferred: !!serverPreferred && row.business_id === serverPreferred,
+      exactAuthLink: !!authUser?.id && row.auth_user_id === authUser.id
+    };
+  }));
+  scored.sort((a,b)=>{
+    if(a.dataScore !== b.dataScore) return b.dataScore - a.dataScore;
+    if(a.localPreferred !== b.localPreferred) return a.localPreferred ? -1 : 1;
+    if(a.serverPreferred !== b.serverPreferred) return a.serverPreferred ? -1 : 1;
+    if(a.exactAuthLink !== b.exactAuthLink) return a.exactAuthLink ? -1 : 1;
+    return new Date(b.row.updated_at||b.row.created_at||0) - new Date(a.row.updated_at||a.row.created_at||0);
+  });
+  return scored[0]?.row || null;
+}
+
 async function resolveUserRole(authUser, staffCache = null, pwd = null){
   if(!authUser && !staffCache)return toast('Authentication failed','error');
   try{
     let staff = staffCache;
     
     if(!staff && authUser){
-        // 1. Try to find by exact auth_user_id first
-        let { data: staffData } = await sb('loan_staff').select('*').eq('auth_user_id', authUser.id).limit(1);
-        if (staffData && staffData.length > 0) {
-            staff = staffData[0];
+        console.log('PrimeCredit auth user:', authUser?.id, authUser?.email);
+        const staffMatches = [];
+        const addStaffRows = rows => (rows||[]).forEach(row => {
+          if(row && !staffMatches.find(existing => existing.id === row.id)) staffMatches.push(row);
+        });
+
+        const byAuth = await sb('loan_staff').select('*').eq('auth_user_id', authUser.id);
+        if(byAuth.error) console.warn('PrimeCredit staff auth query error:', byAuth.error.message);
+        addStaffRows(byAuth.data);
+
+        if(authUser.email){
+          const byEmail = await sb('loan_staff').select('*').ilike('email', authUser.email);
+          if(byEmail.error) console.warn('PrimeCredit staff email query error:', byEmail.error.message);
+          addStaffRows(byEmail.data);
         }
 
-        // 2. If not found by ID, try to link by email (case-insensitive)
-        if(!staff && authUser.email){
-          const { data: byEmailData } = await sb('loan_staff').select('*').ilike('email', authUser.email).limit(1);
-          if(byEmailData && byEmailData.length > 0){
-            staff = byEmailData[0];
-            // Link their new auth ID to the pre-created staff record
-            await sb('loan_staff').update({auth_user_id: authUser.id, last_login: new Date().toISOString()}).eq('id', staff.id);
-          }
+        const verifiedEmail = !!authUser.email && (authUser.email_confirmed_at || authUser.user_metadata?.email_verified);
+        const linkable = staffMatches.filter(row =>
+          verifiedEmail &&
+          row.email &&
+          row.email.toLowerCase() === authUser.email.toLowerCase() &&
+          row.auth_user_id !== authUser.id
+        );
+        for(const row of linkable){
+          const { error: linkError } = await sb('loan_staff')
+            .update({auth_user_id: authUser.id, last_login: new Date().toISOString()})
+            .eq('id', row.id);
+          if(linkError) console.warn('PrimeCredit staff link error:', linkError.message);
+          else row.auth_user_id = authUser.id;
         }
 
-        // Only businesses approved through the registration Edge Function may enter.
+        console.log('PrimeCredit matched staff:', staffMatches.map(row => ({
+          id: row.id,
+          business_id: row.business_id,
+          auth_user_id: row.auth_user_id,
+          email: row.email,
+          active: row.is_active
+        })));
+
+        staff = await choosePrimeCreditStaffRecord(staffMatches, authUser);
+        console.log('PrimeCredit selected business:', staff?.business_id);
+
         if(!staff){
           await supabaseClient.auth.signOut();
           throw new Error('This account is not linked to an approved PrimeCredit business. Contact the platform owner for a registration key.');
@@ -1247,6 +1340,16 @@ async function resolveUserRole(authUser, staffCache = null, pwd = null){
 
     currentUser=staff;
     localStorage.setItem('primecredit_current_user', JSON.stringify(staff));
+    if(staff.business_id){
+      localStorage.setItem('primecredit_preferred_business_id', staff.business_id);
+      if(authUser){
+        try{
+          await supabaseClient.auth.updateUser({ data:{ primecredit_business_id: staff.business_id } });
+        }catch(e){
+          console.warn('PrimeCredit business metadata sync failed:', e.message);
+        }
+      }
+    }
 
     // Cache offline auth if pwd provided
     if (pwd && staff.email) {
@@ -1280,6 +1383,16 @@ async function resolveUserRole(authUser, staffCache = null, pwd = null){
 async function checkAuthSession(){
   // Honor session timeout up-front
   if(checkSessionTimeout()) return false;
+  const{data:{session}}=await supabaseClient.auth.getSession();
+  if(session?.user){
+    // DO NOT resolve roles and log them in if doing password recovery
+    if (window.location.hash.includes('type=recovery')) {
+        return false;
+    }
+    await resolveUserRole(session.user);
+    return true;
+  }
+
   const cachedUserStr = localStorage.getItem('primecredit_current_user');
   if (cachedUserStr) {
       try {
@@ -1291,16 +1404,6 @@ async function checkAuthSession(){
           applyRolloverPenalties();
           return true;
       } catch(e) {}
-  }
-
-  const{data:{session}}=await supabaseClient.auth.getSession();
-  if(session?.user){
-    // DO NOT resolve roles and log them in if doing password recovery
-    if (window.location.hash.includes('type=recovery')) {
-        return false;
-    }
-    await resolveUserRole(session.user);
-    return true;
   }
   return false;
 }
@@ -1461,7 +1564,7 @@ async function executeSwitchUser(email) {
     }
 }
 
-supabaseClient.auth.onAuthStateChange(async(event,session)=>{
+supabaseClient.auth.onAuthStateChange((event,session)=>{
   if (event === 'PASSWORD_RECOVERY') {
     openModal(`
       <h2>Reset Your Password</h2>
@@ -1482,11 +1585,12 @@ supabaseClient.auth.onAuthStateChange(async(event,session)=>{
     `);
     window.history.replaceState(null, '', window.location.pathname);
   }
-  else if(event==='SIGNED_IN'&&session?.user&&!currentUser){
-    if (!window.location.hash.includes('type=recovery')) {
-        await loadSettings();
+  else if(event==='SIGNED_IN'&&session?.user&&!currentUser&&!emailLoginInProgress){
+    setTimeout(async()=>{
+      if (!window.location.hash.includes('type=recovery') && !currentUser) {
         await resolveUserRole(session.user);
-    }
+      }
+    },0);
   }
 });
 
@@ -1541,7 +1645,7 @@ function calcLoan(principal,rate,type,weeks){return type==='reducing_balance'?ca
 const REGISTRATION_FEE = 500;
 // ═══ PROCESSING FEE (flat KES 500 per loan disbursement) ═══
 const PRIME_MONTHLY_INTEREST_RATE = 20;
-function processingFeeFor(amount){ return Number(amount)<5000 ? 250 : 500; }
+function processingFeeFor(amount){ return Number(amount)<=5000 ? 250 : 500; }
 function regFeeTag(amount, dateISO){ return `[REG_FEE:${amount}:${dateISO}]`; }
 function parseRegFeeFromNotes(notes){
   if(!notes) return null;
@@ -2147,8 +2251,8 @@ async function openAddClientModal(){
     <div class="form-row"><div class="form-group"><label>Occupation</label><input class="input" id="cOccupation"></div><div class="form-group"><label>Employer</label><input class="input" id="cEmployer"></div></div>
     <div class="form-group"><label>Daily Income (KES)</label><input class="input" type="number" id="cIncome" placeholder="e.g. 500"></div>
     <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)">🔒 <strong>Guarantor Details</strong></div>
-    <div class="form-row"><div class="form-group"><label>Guarantor Full Name</label><input class="input" id="cNokName"></div><div class="form-group"><label>Guarantor Phone</label><input class="input" id="cNokPhone"></div></div>
-    <div class="form-group"><label>Guarantor Relationship</label><input class="input" id="cNokRel" placeholder="e.g. Spouse, Sibling, Friend"></div>
+    <div class="form-row"><div class="form-group"><label>Next of Kin Full Name</label><input class="input" id="cNokName"></div><div class="form-group"><label>Next of Kin Phone</label><input class="input" id="cNokPhone"></div></div>
+    <div class="form-group"><label>Relationship</label><input class="input" id="cNokRel" placeholder="e.g. Spouse, Sibling, Parent"></div>
     <div class="form-group"><label>Notes</label><textarea class="textarea" id="cNotes"></textarea></div>
     ${officerDropdown}
     <div style="padding:10px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:8px;margin-bottom:12px;font-size:13px;display:flex;justify-content:space-between;align-items:center">
@@ -2331,6 +2435,7 @@ async function editClient(id){
       <div class="form-group"><label>Next of Kin Name</label><input class="input" id="ecNokName" value="${(c.next_of_kin_name||'').replace(/"/g,'&quot;')}"></div>
       <div class="form-group"><label>Next of Kin Phone</label><input class="input" id="ecNokPhone" value="${(c.next_of_kin_phone||'').replace(/"/g,'&quot;')}"></div>
     </div>
+    <div class="form-group"><label>Next of Kin Relationship</label><input class="input" id="ecNokRelation" value="${(c.next_of_kin_relation||'').replace(/"/g,'&quot;')}"></div>
     <div class="modal-actions">
       ${hasRole('admin')?`<button class="btn btn-danger" style="margin-right:auto" onclick="deleteClient('${c.id}')">Delete Client</button>`:''}
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
@@ -2483,9 +2588,9 @@ async function exportClientsExcel(){
         'Occupation':c.occupation||'-',
         'Employer':c.employer||'-',
         'Daily Income (KES)':c.monthly_income||0,
-        'Guarantor Name':c.next_of_kin_name||'-',
-        'Guarantor Phone':c.next_of_kin_phone||'-',
-        'Guarantor Relation':c.next_of_kin_relation||'-',
+        'Next of Kin Name':c.next_of_kin_name||'-',
+        'Next of Kin Phone':c.next_of_kin_phone||'-',
+        'Next of Kin Relation':c.next_of_kin_relation||'-',
         'Date Onboarded':c.created_at?c.created_at.slice(0,10):'-',
         'Loan Officer':officerId?staffMap[officerId]||'-':'-',
         'Total Loans':cLoans.length,
@@ -2664,13 +2769,16 @@ async function openNewApplication(){
         <input type="hidden" id="appClient" value="">
         <div id="appClientPickInfo" style="margin-top:6px;font-size:12px;color:var(--text-secondary)"></div>
       </div>
-      <p style="font-size:12px;color:var(--text-secondary);margin-top:6px">💡 Guarantor details are collected during client registration.</p>
+      <p style="font-size:12px;color:var(--text-secondary);margin-top:6px">Select the client first. Guarantor details will be captured on this loan application.</p>
     </div>
     <div id="appStep2" style="display:none">
       <div class="form-group"><label>Loan Amount *</label><input class="input" type="number" id="appAmount" oninput="appCalcUpdate()" placeholder="Enter amount"></div>
       <div id="appTierInfo" class="card" style="margin:8px 0;font-size:13px;display:none"></div>
       <div class="form-group"><label>Term (weeks) *</label><input class="input" type="number" id="appTerm" oninput="appCalcUpdate()" placeholder="Number of weeks"></div>
       <div class="form-group"><label>Purpose</label><textarea class="textarea" id="appPurpose"></textarea></div>
+      <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin:10px 0 12px;font-size:12px;color:var(--text-secondary)"><strong>Loan Guarantor Details</strong></div>
+      <div class="form-row"><div class="form-group"><label>Guarantor Full Name</label><input class="input" id="appGuarantorName"></div><div class="form-group"><label>Guarantor Phone</label><input class="input" id="appGuarantorPhone"></div></div>
+      <div class="form-group"><label>Guarantor Relationship</label><input class="input" id="appGuarantorRel" placeholder="e.g. Spouse, Friend, Business partner"></div>
       <div id="appCalcResult" class="card" style="margin-top:8px"></div>
     </div>
     <div id="appStep3" style="display:none"><div id="appReview"></div></div>
@@ -2752,10 +2860,11 @@ function buildAppReview(){
     <p><strong>Amount:</strong> ${fmtMoney(amt)}</p><p><strong>Rate:</strong> ${PRIME_MONTHLY_INTEREST_RATE}% per month</p>
     <p><strong>Term:</strong> ${$('#appTerm').value} weeks</p>
     <p><strong>Purpose:</strong> ${$('#appPurpose').value||'-'}</p>
+    <p><strong>Guarantor:</strong> ${$('#appGuarantorName')?.value||'-'} ${$('#appGuarantorPhone')?.value?`(${ $('#appGuarantorPhone').value })`:''}</p>
+    <p><strong>Guarantor Relationship:</strong> ${$('#appGuarantorRel')?.value||'-'}</p>
     <p><strong>Weekly Installment:</strong> ${fmtMoney(calc.weekly)}</p>
     <p><strong>Total Payable:</strong> ${fmtMoney(calc.totalPayable)}</p>
     <p><strong>Processing Fee:</strong> ${fmtMoney(processingFeeFor(amt))}</p>
-    <p style="font-size:11px;color:var(--text-secondary)">Guarantor details on file from client registration.</p>
   </div>`;
 }
 
@@ -2806,7 +2915,7 @@ async function submitApplication(){
         appOfficerId = prevLoanCheck[0].loan_officer_id;
       }
     }
-    const rec={application_no:appNo,client_id:selectedClientId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,status:'submitted',loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType};
+    const rec={application_no:appNo,client_id:selectedClientId,applied_amount:amt,applied_term_weeks:Number($('#appTerm').value),purpose:$('#appPurpose').value,guarantor_name:($('#appGuarantorName')?.value||'').trim(),guarantor_phone:($('#appGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#appGuarantorRel')?.value||'').trim(),status:'submitted',loan_officer_id:appOfficerId,business_id:currentUser?.business_id,loan_type:loanType};
     
     // Robust auto-tier → product mapping (case-insensitive, trims, fallbacks)
     const tier=getAutoTier(amt);
@@ -2880,7 +2989,8 @@ async function viewApplication(id){
       <p><strong>Amount:</strong> ${fmtMoney(a.applied_amount)}</p><p><strong>Rate:</strong> ${PRIME_MONTHLY_INTEREST_RATE}% / month</p>
       <p><strong>Term:</strong> ${a.applied_term_weeks} weeks</p><p><strong>Date:</strong> ${fmtDate(a.created_at)}</p>
       <p><strong>Purpose:</strong> ${a.purpose||'-'}</p>
-      <p><strong>Guarantor:</strong> On file from client registration</p>
+      <p><strong>Guarantor:</strong> ${escapeHtml(a.guarantor_name||'-')} ${a.guarantor_phone?`(${escapeHtml(a.guarantor_phone)})`:''}</p>
+      <p><strong>Guarantor Relationship:</strong> ${escapeHtml(a.guarantor_relationship||'-')}</p>
       ${a.rejection_reason?`<p style="grid-column:1/-1"><strong>Rejection Reason:</strong> <span style="color:var(--accent-red)">${a.rejection_reason}</span></p>`:''}
     </div>
     ${renderApplicationAssetManager(a)}
@@ -2908,6 +3018,9 @@ async function editApplication(id){
       <div class="form-group"><label>Term (weeks) *</label><input class="input" type="number" id="editAppTerm" value="${Number(a.applied_term_weeks||0)}"></div>
     </div>
     <div class="form-group"><label>Purpose</label><textarea class="textarea" id="editAppPurpose">${escapeHtml(a.purpose||'')}</textarea></div>
+    <div style="padding:8px 12px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;margin:10px 0 12px;font-size:12px;color:var(--text-secondary)"><strong>Loan Guarantor Details</strong></div>
+    <div class="form-row"><div class="form-group"><label>Guarantor Full Name</label><input class="input" id="editAppGuarantorName" value="${escapeHtml(a.guarantor_name||'')}"></div><div class="form-group"><label>Guarantor Phone</label><input class="input" id="editAppGuarantorPhone" value="${escapeHtml(a.guarantor_phone||'')}"></div></div>
+    <div class="form-group"><label>Guarantor Relationship</label><input class="input" id="editAppGuarantorRel" value="${escapeHtml(a.guarantor_relationship||'')}"></div>
     <div class="modal-actions">
       <button class="btn btn-primary" onclick="saveApplicationEdit('${a.id}')">Save changes</button>
       <button class="btn btn-outline" onclick="viewApplication('${a.id}')">Back</button>
@@ -2921,7 +3034,7 @@ async function saveApplicationEdit(id){
   if(!amount||amount<=0)return toast('Enter a valid loan amount','warning');
   if(!term||term<=0)return toast('Enter a valid term','warning');
   try{
-    const rec={applied_amount:amount,applied_term_weeks:term,purpose:$('#editAppPurpose')?.value||'',updated_at:new Date().toISOString()};
+    const rec={applied_amount:amount,applied_term_weeks:term,purpose:$('#editAppPurpose')?.value||'',guarantor_name:($('#editAppGuarantorName')?.value||'').trim(),guarantor_phone:($('#editAppGuarantorPhone')?.value||'').trim(),guarantor_relationship:($('#editAppGuarantorRel')?.value||'').trim(),updated_at:new Date().toISOString()};
     const{error}=await sb('loan_applications').update(rec).eq('id',id).eq('business_id',currentUser.business_id).eq('status','submitted');
     if(error)throw error;
     await audit('application_updated','loan_applications',id,null,rec);
@@ -4680,9 +4793,9 @@ async function loadReportData(id){
         'Occupation':c.occupation||'-',
         'Employer':c.employer||'-',
         'Daily Income':c.monthly_income||0,
-        'Guarantor':c.next_of_kin_name||'-',
-        'Guarantor Phone':c.next_of_kin_phone||'-',
-        'Guarantor Relation':c.next_of_kin_relation||'-',
+        'Next of Kin':c.next_of_kin_name||'-',
+        'Next of Kin Phone':c.next_of_kin_phone||'-',
+        'Next of Kin Relation':c.next_of_kin_relation||'-',
         'Date Onboarded':c.created_at?c.created_at.slice(0,10):'-',
         'Loan Officer':officerId?staffMap[officerId]||'-':'-',
         'Total Loans':cLoans.length,
@@ -4698,7 +4811,7 @@ async function loadReportData(id){
       {label:'Total Clients',value:filteredClients.length},
       {label:'Active Borrowers',value:rows.filter(r=>r['Status']==='Active Borrower').length},
       {label:'Past Borrowers',value:rows.filter(r=>r['Status']==='Past Borrower').length}
-    ],rows,cols:['Full Name','ID Number','Phone','Alt Phone','Email','Gender','DOB','Address / Location','Occupation','Employer','Daily Income','Guarantor','Guarantor Phone','Guarantor Relation','Date Onboarded','Loan Officer','Total Loans','Active Loans','Latest Loan #','Total Borrowed','Outstanding (KES)','Arrears (KES)','Status']};
+    ],rows,cols:['Full Name','ID Number','Phone','Alt Phone','Email','Gender','DOB','Address / Location','Occupation','Employer','Daily Income','Next of Kin','Next of Kin Phone','Next of Kin Relation','Date Onboarded','Loan Officer','Total Loans','Active Loans','Latest Loan #','Total Borrowed','Outstanding (KES)','Arrears (KES)','Status']};
   }
   if(id==='collection_daily'){
     const todayStr=today();
@@ -7036,6 +7149,7 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
 
 (async()=>{
   setupMobileProtections();
+  if(await refreshPrimeCreditBrowserCache()) return;
   keepSupabaseAlive();
   const loggedIn=await checkAuthSession();
   if(loggedIn){
