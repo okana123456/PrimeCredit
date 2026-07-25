@@ -391,7 +391,8 @@ const SERVICE_BILLING_LOCK_DAY = 4;
 const TEMP_ADMIN_PAYMENT_LOCK_ENABLED = true;
 const TEMP_ADMIN_PAYMENT_LOCK_AMOUNT = 20000;
 const TEMP_ADMIN_PAYMENT_LOCK_PAYBILL = '542542';
-const TEMP_ADMIN_PAYMENT_LOCK_ACCOUNT = '130795 I$M bank';
+const TEMP_ADMIN_PAYMENT_LOCK_ACCOUNT = '130795';
+const TEMP_ADMIN_PAYMENT_LOCK_BANK = 'I&M Bank';
 
 async function refreshPrimeCreditBrowserCache(){
   const versionKey = 'primecredit_app_version';
@@ -1529,6 +1530,10 @@ function renderTemporaryAdminPaymentLock(){
         <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px">
           <div style="font-size:12px;color:var(--text-secondary);text-transform:uppercase;font-weight:700">Account</div>
           <div style="font-size:20px;font-weight:800;color:var(--text-primary);word-break:break-word">${TEMP_ADMIN_PAYMENT_LOCK_ACCOUNT}</div>
+        </div>
+        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:12px;color:var(--text-secondary);text-transform:uppercase;font-weight:700">Bank</div>
+          <div style="font-size:20px;font-weight:800;color:var(--text-primary);word-break:break-word">${TEMP_ADMIN_PAYMENT_LOCK_BANK}</div>
         </div>
       </div>
       <p style="color:var(--text-secondary);line-height:1.6;margin-bottom:18px">
