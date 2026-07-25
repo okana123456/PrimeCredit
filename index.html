@@ -362,7 +362,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'primecredit-2026-07-23-cache-v7';
+const APP_VERSION = 'primecredit-2026-07-25-admin-balance-lock-v8';
 const SUPABASE_URL = 'https://ahzdlgsdpmltrlhbervv.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFoemRsZ3NkcG1sdHJsaGJlcnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNDc3MjIsImV4cCI6MjA5OTgyMzcyMn0.Exj4iqLayPtQQHk1y7ZWQAT8i93fsRjz1Kwe_2mNtFU';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -387,6 +387,11 @@ const SERVICE_BILLING_AMOUNT = 2000;
 const SERVICE_BILLING_FIRST_REMINDER_DATE = '2026-08-02';
 const SERVICE_BILLING_REMINDER_DAY = 2;
 const SERVICE_BILLING_LOCK_DAY = 4;
+// Set this to false after the remaining system balance is cleared.
+const TEMP_ADMIN_PAYMENT_LOCK_ENABLED = true;
+const TEMP_ADMIN_PAYMENT_LOCK_AMOUNT = 20000;
+const TEMP_ADMIN_PAYMENT_LOCK_PAYBILL = '542542';
+const TEMP_ADMIN_PAYMENT_LOCK_ACCOUNT = '130795 I$M bank';
 
 async function refreshPrimeCreditBrowserCache(){
   const versionKey = 'primecredit_app_version';
@@ -1490,6 +1495,50 @@ function hasRole(...roles){
     return roles.some(r => userRoles.includes(r));
 }
 
+function isTemporaryAdminPaymentLockActive(){
+  return TEMP_ADMIN_PAYMENT_LOCK_ENABLED && !!currentUser && hasRole('admin');
+}
+
+function renderTemporaryAdminPaymentLock(){
+  const main = $('#mainContent');
+  if(!main) return;
+  currentSection = 'payment_lock';
+  $$('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.querySelector('.sidebar')?.classList.remove('open');
+  main.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>Account Payment Required</h1>
+        <p style="color:var(--text-secondary);margin-top:6px">PrimeCredit access is temporarily paused pending balance clearance.</p>
+      </div>
+    </div>
+    <div class="card" style="max-width:680px;margin:24px auto;border-top:6px solid var(--warning);box-shadow:0 18px 45px rgba(15,91,74,.12)">
+      <h2 style="font-size:24px;margin-bottom:10px;color:var(--text-primary)">Please clear the remaining balance</h2>
+      <p style="color:var(--text-secondary);line-height:1.6;margin-bottom:18px">
+        The system owner paid a deposit of KES 10,000. The remaining balance is now due before access can continue.
+      </p>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0">
+        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:12px;color:var(--text-secondary);text-transform:uppercase;font-weight:700">Amount</div>
+          <div style="font-size:24px;font-weight:800;color:var(--text-primary)">KES ${TEMP_ADMIN_PAYMENT_LOCK_AMOUNT.toLocaleString('en-KE')}</div>
+        </div>
+        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:12px;color:var(--text-secondary);text-transform:uppercase;font-weight:700">Paybill</div>
+          <div style="font-size:24px;font-weight:800;color:var(--text-primary)">${TEMP_ADMIN_PAYMENT_LOCK_PAYBILL}</div>
+        </div>
+        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:12px;color:var(--text-secondary);text-transform:uppercase;font-weight:700">Account</div>
+          <div style="font-size:20px;font-weight:800;color:var(--text-primary);word-break:break-word">${TEMP_ADMIN_PAYMENT_LOCK_ACCOUNT}</div>
+        </div>
+      </div>
+      <p style="color:var(--text-secondary);line-height:1.6;margin-bottom:18px">
+        After payment, please call support for confirmation and reactivation.
+      </p>
+      <button class="btn btn-outline" onclick="handleLogout()">Logout</button>
+    </div>
+  `;
+}
+
 async function openSwitchUserModal() {
     const { data: staff } = await sb('loan_staff').select('*')
         .eq('business_id', currentUser.business_id)
@@ -1597,6 +1646,10 @@ supabaseClient.auth.onAuthStateChange((event,session)=>{
 
 // ═══ NAVIGATION ═══
 function navigateTo(section){
+  if(isTemporaryAdminPaymentLockActive()){
+    renderTemporaryAdminPaymentLock();
+    return;
+  }
   currentSection=section;
   try { localStorage.setItem('primecredit_last_section', section); } catch(e) {}
   $$('.nav-item').forEach(n=>{n.classList.toggle('active',n.dataset.section===section)});
