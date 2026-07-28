@@ -43,7 +43,8 @@ serve(async (req) => {
   try {
     const authHeader = req.headers.get("Authorization") || "";
     const jwt = authHeader.replace("Bearer ", "");
-    const { phone } = await req.json();
+    const body = await req.json();
+    const { phone } = body;
     const cleanPhone = normalizePhone(phone);
     if (!/^254(7|1)\d{8}$/.test(cleanPhone)) {
       return json({ ok: false, message: "Enter a valid Safaricom phone number." }, 400);
@@ -55,20 +56,76 @@ serve(async (req) => {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    const { data: userData } = await supabase.auth.getUser(jwt);
-    const user = userData?.user;
-    if (!user) return json({ ok: false, message: "Please sign in again." }, 401);
+    const amount = Math.max(
+      1,
+      Number(
+        Deno.env.get("SERVICE_BILLING_AMOUNT") ||
+        Deno.env.get("BILLING_AMOUNT") ||
+        3000
+      )
+    );
+    const isSafeTest =
+      !!Deno.env.get("SERVICE_PAYMENT_TEST_KEY") &&
+      String(body.test_key || body.service_payment_test_key || "").trim() === Deno.env.get("SERVICE_PAYMENT_TEST_KEY");
 
-    const { data: staff } = await supabase
-      .from("loan_staff")
-      .select("id, business_id, role, is_active")
-      .eq("auth_user_id", user.id)
-      .maybeSingle();
+    let staff: { id: string; business_id: string; role: string; is_active: boolean } | null = null;
+    if (isSafeTest) {
+      if (!body.business_id || !body.staff_id) {
+        return json({ ok: false, message: "Test mode requires business_id and staff_id." }, 400);
+      }
+      const { data: testStaff } = await supabase
+        .from("loan_staff")
+        .select("id, business_id, role, is_active")
+        .eq("id", body.staff_id)
+        .eq("business_id", body.business_id)
+        .maybeSingle();
+      staff = testStaff;
+    } else {
+      const { data: userData } = await supabase.auth.getUser(jwt);
+      const user = userData?.user;
+      if (!user) return json({ ok: false, message: "Please sign in again." }, 401);
+
+      const { data: authStaff } = await supabase
+        .from("loan_staff")
+        .select("id, business_id, role, is_active")
+        .eq("auth_user_id", user.id)
+        .maybeSingle();
+      staff = authStaff;
+    }
     if (!staff?.is_active || !["admin", "branch_manager"].includes(staff.role)) {
       return json({ ok: false, message: "Only admins can renew the system subscription." }, 403);
     }
 
-    const amount = Math.max(1, Number(Deno.env.get("SERVICE_BILLING_AMOUNT") || 3000));
+    const { data: existingCycle } = await supabase
+      .from("loan_billing_cycles")
+      .select("status, amount, paid_at, billing_month")
+      .eq("business_id", staff.business_id)
+      .eq("billing_month", billingMonth())
+      .maybeSingle();
+    if (existingCycle?.status === "paid") {
+      return json({
+        ok: true,
+        already_paid: true,
+        message: "Current month subscription is already paid.",
+        amount,
+        billing_month: billingMonth(),
+        paid_at: existingCycle.paid_at,
+      });
+    }
+
+    if (isSafeTest && body.dry_run !== false) {
+      return json({
+        ok: true,
+        test_mode: true,
+        message: "PrimeCredit service payment test passed. No M-Pesa prompt was sent.",
+        amount,
+        billing_month: billingMonth(),
+        business_id: staff.business_id,
+        staff_id: staff.id,
+        existing_status: existingCycle?.status || "not_paid",
+      });
+    }
+
     const shortcode = env("SERVICE_SHORTCODE");
     const consumerKey = env("SERVICE_CONSUMER_KEY");
     const consumerSecret = env("SERVICE_CONSUMER_SECRET");

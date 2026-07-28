@@ -383,7 +383,7 @@ let charts = {};
 let appSettings = null; 
 let serviceBilling = { status:'unknown', paid:false, locked:false, reminder:false, pending:false, cycleMonth:null, checkedAt:null };
 let emailLoginInProgress = false;
-const SERVICE_BILLING_AMOUNT = 2000;
+const SERVICE_BILLING_AMOUNT = 3000;
 const SERVICE_BILLING_FIRST_REMINDER_DATE = '2026-08-02';
 const SERVICE_BILLING_REMINDER_DAY = 2;
 const SERVICE_BILLING_LOCK_DAY = 4;
@@ -990,7 +990,11 @@ async function startServiceBillingPayment(btn){
       return;
     }
     const { data, error } = await supabaseClient.functions.invoke('start-service-payment', {
-      body:{ phone },
+      body:{
+        phone,
+        business_id: currentUser?.business_id,
+        staff_id: currentUser?.id
+      },
       headers:{ Authorization:`Bearer ${accessToken}` }
     });
     if(error) throw error;
