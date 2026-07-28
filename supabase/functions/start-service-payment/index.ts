@@ -36,6 +36,14 @@ function billingMonth() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 }
 
+function billingStartDate() {
+  return Deno.env.get("SERVICE_BILLING_START_DATE") || "2026-08-01";
+}
+
+function isBeforeBillingStart() {
+  return new Date() < new Date(`${billingStartDate()}T00:00:00Z`);
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, message: "Use POST" }, 405);
@@ -67,6 +75,19 @@ serve(async (req) => {
     const isSafeTest =
       !!Deno.env.get("SERVICE_PAYMENT_TEST_KEY") &&
       String(body.test_key || body.service_payment_test_key || "").trim() === Deno.env.get("SERVICE_PAYMENT_TEST_KEY");
+
+    if (isSafeTest && !body.business_id && !body.staff_id && body.dry_run !== false) {
+      return json({
+        ok: true,
+        test_mode: true,
+        message: "PrimeCredit service payment test passed. No M-Pesa prompt was sent.",
+        amount,
+        billing_month: billingMonth(),
+        billing_starts_on: billingStartDate(),
+        trial_active: isBeforeBillingStart(),
+        existing_status: "not_checked_no_business",
+      });
+    }
 
     let staff: { id: string; business_id: string; role: string; is_active: boolean } | null = null;
     if (isSafeTest) {
