@@ -362,7 +362,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'primecredit-2026-07-25-admin-balance-lock-v8';
+const APP_VERSION = 'primecredit-2026-07-30-mobile-photo-picker-v9';
 const SUPABASE_URL = 'https://ahzdlgsdpmltrlhbervv.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFoemRsZ3NkcG1sdHJsaGJlcnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNDc3MjIsImV4cCI6MjA5OTgyMzcyMn0.Exj4iqLayPtQQHk1y7ZWQAT8i93fsRjz1Kwe_2mNtFU';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -631,6 +631,7 @@ function escapeHtml(v){
 
 const CLIENT_PHOTO_BUCKET = 'client-photos';
 const CLIENT_ASSET_BUCKET = 'client-assets';
+const PHOTO_FILE_ACCEPT = 'image/*,.jpg,.jpeg,.png,.webp';
 function clientInitials(name){
   const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
   return (parts[0]?.[0] || 'C') + (parts[1]?.[0] || '');
@@ -661,7 +662,8 @@ let clientPhotoCropState = null;
 function loadClientPhotoImage(file){
   return new Promise((resolve,reject)=>{
     if(!file) return reject(new Error('Please choose a photo first'));
-    if(!/^image\/(jpeg|png|webp)$/i.test(file.type)) return reject(new Error('Use a JPG, PNG, or WEBP image'));
+    const isSupportedImage=/^image\/(jpeg|png|webp)$/i.test(file.type||'') || /\.(jpe?g|png|webp)$/i.test(file.name||'');
+    if(!isSupportedImage) return reject(new Error('Use a JPG, PNG, or WEBP image from Gallery, Downloads, WPS, CamScanner, or Files.'));
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('Could not read the selected photo'));
     reader.onload = () => {
@@ -2394,7 +2396,7 @@ async function viewClient(id){
           <h2>${escapeHtml(c.full_name)}</h2>
           <div style="font-size:12px;color:var(--text-secondary)">${escapeHtml(c.phone||'-')} &nbsp;|&nbsp; ID: ${escapeHtml(c.id_number||'-')}</div>
           ${canShowPhotoUpload?`
-            <input id="${photoInputId}" type="file" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="uploadClientPhoto('${c.id}', this, '${escapeHtml(c.photo_path||'')}')">
+            <input id="${photoInputId}" type="file" accept="${PHOTO_FILE_ACCEPT}" style="display:none" onchange="uploadClientPhoto('${c.id}', this, '${escapeHtml(c.photo_path||'')}')">
             <div class="client-photo-actions">
               <button class="btn btn-outline btn-sm" onclick="document.getElementById('${photoInputId}').click()">${c.photo_path?'Change photo':'Upload photo'}</button>
               ${canManagePhoto && c.photo_path?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-red);color:var(--accent-red)" onclick="removeClientPhoto('${c.id}','${escapeHtml(c.photo_path)}')">Remove photo</button>`:''}
@@ -2418,7 +2420,7 @@ async function viewClient(id){
       <div class="card" style="margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
           <div><strong>Client Asset Photos</strong><div style="font-size:11px;color:var(--text-secondary);margin-top:2px">Compressed automatically to protect storage and loading speed.</div></div>
-          <input id="${assetInputId}" type="file" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="uploadClientAssetPhoto('${c.id}',this)">
+          <input id="${assetInputId}" type="file" accept="${PHOTO_FILE_ACCEPT}" style="display:none" onchange="uploadClientAssetPhoto('${c.id}',this)">
           <button class="btn btn-outline btn-sm" onclick="document.getElementById('${assetInputId}').click()">+ Add asset photo</button>
         </div>
         <div class="client-asset-gallery">
@@ -3036,7 +3038,7 @@ function renderApplicationAssetManager(app){
           <div style="font-size:11px;color:var(--text-secondary);margin-top:2px">Review asset photos before approval. They also remain visible on the client profile.</div>
         </div>
         ${canManage?`
-          <input id="${inputId}" type="file" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="uploadClientAssetPhoto('${clientId}',this,'application','${app.id}')">
+          <input id="${inputId}" type="file" accept="${PHOTO_FILE_ACCEPT}" style="display:none" onchange="uploadClientAssetPhoto('${clientId}',this,'application','${app.id}')">
           <button class="btn btn-outline btn-sm" onclick="document.getElementById('${inputId}').click()">+ Add asset photo</button>
         `:''}
       </div>
