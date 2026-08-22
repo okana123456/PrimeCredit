@@ -362,7 +362,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'primecredit-2026-07-30-mobile-photo-picker-v9';
+const APP_VERSION = 'primecredit-2026-08-22-c2b-callback-v10';
 const SUPABASE_URL = 'https://ahzdlgsdpmltrlhbervv.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFoemRsZ3NkcG1sdHJsaGJlcnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNDc3MjIsImV4cCI6MjA5OTgyMzcyMn0.Exj4iqLayPtQQHk1y7ZWQAT8i93fsRjz1Kwe_2mNtFU';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -5920,12 +5920,12 @@ async function renderOfficerPerformance(){
 }
 
 // ═══ DARAJA HELPERS ═══
-function copyCallbackUrl(){
-  const inp=document.getElementById('setCallbackUrl');
+function copyDarajaUrl(inputId,label='Callback URL'){
+  const inp=document.getElementById(inputId);
   if(!inp) return;
   inp.select(); inp.setSelectionRange(0, 99999);
-  try { navigator.clipboard.writeText(inp.value); toast('Callback URL copied','success'); }
-  catch(e){ document.execCommand('copy'); toast('Callback URL copied','success'); }
+  try { navigator.clipboard.writeText(inp.value); toast(label+' copied','success'); }
+  catch(e){ document.execCommand('copy'); toast(label+' copied','success'); }
 }
 
 
@@ -6342,7 +6342,8 @@ async function renderSettings(){
   const main=$('#mainContent');
   try{
     const settings=await loadSettings();
-    const callbackUrl=SUPABASE_URL+'/functions/v1/primecredit-payment-callback';
+    const confirmationUrl=SUPABASE_URL+'/functions/v1/primecredit-c2b-confirmation-v2';
+    const validationUrl=SUPABASE_URL+'/functions/v1/primecredit-c2b-validation-v2';
     main.innerHTML=`
       <div class="page-header"><h1>Settings</h1></div>
       <div class="card" style="max-width:700px;margin-bottom:16px">
@@ -6383,10 +6384,17 @@ async function renderSettings(){
         <div class="form-group">
           <label>C2B Confirmation URL (auto-registered with Safaricom on Save)</label>
           <div style="display:flex;gap:6px">
-            <input class="input" id="setCallbackUrl" value="${callbackUrl}" readonly style="opacity:0.7">
-            <button type="button" class="btn btn-outline btn-sm" onclick="copyCallbackUrl()">Copy</button>
+            <input class="input" id="setConfirmationUrl" value="${confirmationUrl}" readonly style="opacity:0.7">
+            <button type="button" class="btn btn-outline btn-sm" onclick="copyDarajaUrl('setConfirmationUrl','Confirmation URL')">Copy</button>
           </div>
-          <div style="font-size:11px;color:var(--text-secondary);margin-top:4px">This URL is sent to Safaricom automatically when you click <strong>Save Settings</strong>.</div>
+        </div>
+        <div class="form-group">
+          <label>C2B Validation URL (auto-registered with Safaricom on Save)</label>
+          <div style="display:flex;gap:6px">
+            <input class="input" id="setValidationUrl" value="${validationUrl}" readonly style="opacity:0.7">
+            <button type="button" class="btn btn-outline btn-sm" onclick="copyDarajaUrl('setValidationUrl','Validation URL')">Copy</button>
+          </div>
+          <div style="font-size:11px;color:var(--text-secondary);margin-top:4px">Both PrimeCredit-only URLs are sent to Safaricom when you click <strong>Save Settings</strong>.</div>
         </div>
         <div style="background:rgba(16,185,129,0.07);border:1px solid rgba(16,185,129,0.2);border-radius:8px;padding:10px;margin-bottom:12px;font-size:12px;line-height:1.7">
           <strong style="color:var(--accent-green)">How clients pay:</strong><br>
@@ -6436,9 +6444,16 @@ async function saveSettings(){
       const saveBtn = document.querySelector('[onclick="saveSettings()"]');
       if(saveBtn){ saveBtn.disabled=true; saveBtn.textContent='Registering with Safaricom...'; }
       try{
+        const { data: sessionData } = await supabaseClient.auth.getSession();
+        const accessToken = sessionData?.session?.access_token;
+        if(!accessToken) throw new Error('Please sign in again before registering Daraja.');
         const regResp = await fetch(SUPABASE_URL+'/functions/v1/register-daraja', {
           method:'POST',
-          headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_KEY},
+          headers:{
+            'Content-Type':'application/json',
+            'apikey':SUPABASE_KEY,
+            'Authorization':'Bearer '+accessToken
+          },
           body: JSON.stringify({ shortcode, consumer_key: consumerKey, consumer_secret: consumerSecret, environment: darajaEnv })
         });
         const regJson = await regResp.json().catch(()=>({}));

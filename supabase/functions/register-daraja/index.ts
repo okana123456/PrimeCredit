@@ -68,7 +68,8 @@ serve(async (req) => {
       }, 400);
     }
 
-    const confirmationUrl = `${supabaseUrl}/functions/v1/primecredit-payment-callback`;
+    const confirmationUrl = `${supabaseUrl}/functions/v1/primecredit-c2b-confirmation-v2`;
+    const validationUrl = `${supabaseUrl}/functions/v1/primecredit-c2b-validation-v2`;
     const registerResponse = await fetch(`${url}/mpesa/c2b/v2/registerurl`, {
       method: "POST",
       headers: {
@@ -79,7 +80,7 @@ serve(async (req) => {
         ShortCode: cleanShortcode,
         ResponseType: "Completed",
         ConfirmationURL: confirmationUrl,
-        ValidationURL: confirmationUrl,
+        ValidationURL: validationUrl,
       }),
     });
 
@@ -88,11 +89,12 @@ serve(async (req) => {
       const message = String(registerData.errorMessage || registerData.ResponseDescription || "");
       if (message.toLowerCase().includes("already registered")) {
         return json({
-          success: true,
-          warning: message,
-          data: registerData,
+          success: false,
+          error: "This PayBill already has C2B URLs registered. Update or remove the old URLs in Safaricom Daraja URL Management, then save PrimeCredit Settings again.",
+          response: registerData,
           confirmation_url: confirmationUrl,
-        });
+          validation_url: validationUrl,
+        }, 409);
       }
       return json({
         success: false,
@@ -101,7 +103,12 @@ serve(async (req) => {
       }, 400);
     }
 
-    return json({ success: true, data: registerData, confirmation_url: confirmationUrl });
+    return json({
+      success: true,
+      data: registerData,
+      confirmation_url: confirmationUrl,
+      validation_url: validationUrl,
+    });
   } catch (error) {
     return json({ success: false, error: error instanceof Error ? error.message : String(error) }, 500);
   }

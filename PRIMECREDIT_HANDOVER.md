@@ -189,11 +189,12 @@ Functions:
 - `register-daraja`
   - Registers the business Paybill C2B confirmation and validation URLs with Safaricom.
   - Uses the business admin's saved/pasted Daraja credentials from settings.
-  - Current confirmation/validation callback is:
-    `https://ahzdlgsdpmltrlhbervv.supabase.co/functions/v1/primecredit-payment-callback`
+  - Current PrimeCredit C2B URLs are:
+    - Confirmation: `https://ahzdlgsdpmltrlhbervv.supabase.co/functions/v1/primecredit-c2b-confirmation-v2`
+    - Validation: `https://ahzdlgsdpmltrlhbervv.supabase.co/functions/v1/primecredit-c2b-validation-v2`
 
-- `primecredit-payment-callback`
-  - Main C2B callback for PrimeCredit loan repayment payments.
+- `primecredit-c2b-confirmation-v2`
+  - Current uniquely named C2B confirmation callback for PrimeCredit loan repayment payments.
   - Reads Daraja callback payload.
   - Uses shortcode to find `loan_settings`.
   - Uses account number/BillRefNumber to match `loan_clients.id_number`.
@@ -203,7 +204,11 @@ Functions:
   - Has console logs for debugging.
 
 - `payment-callback`
-  - Older/general callback copy. Prefer `primecredit-payment-callback` for PrimeCredit.
+  - Older/general callback copy. Do not use it for new PrimeCredit registrations.
+
+- `primecredit-payment-callback`
+  - Previous PrimeCredit callback retained temporarily so an old PayBill registration cannot lose payments during migration.
+  - New registrations use the separate confirmation-v2 and validation-v2 functions.
 
 - `start-service-payment`
   - Starts the platform subscription STK push.
@@ -270,7 +275,7 @@ There are two separate payment flows:
 1. Client loan repayments through business Paybill/C2B.
    - Parent/customer/client pays via Paybill.
    - Account number should be the client's ID number as stored in `loan_clients.id_number`.
-   - Safaricom sends the C2B callback to `primecredit-payment-callback`.
+   - Safaricom sends confirmations to `primecredit-c2b-confirmation-v2` and validation requests to `primecredit-c2b-validation-v2`.
    - The system matches the ID number to a client and active loan.
 
 2. Business monthly subscription payment to the platform owner.
@@ -340,6 +345,8 @@ Edge Functions:
 - `supabase/functions/register-primecredit-business/index.ts`
 - `supabase/functions/register-daraja/index.ts`
 - `supabase/functions/primecredit-payment-callback/index.ts`
+- `supabase/functions/primecredit-c2b-confirmation-v2/index.ts`
+- `supabase/functions/primecredit-c2b-validation-v2/index.ts`
 - `supabase/functions/payment-callback/index.ts`
 - `supabase/functions/start-service-payment/index.ts`
 - `supabase/functions/service-payment-callback/index.ts`
