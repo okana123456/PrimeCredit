@@ -1,4 +1,4 @@
-const CACHE_NAME = 'primecredit-cache-v6';
+const CACHE_NAME = 'primecredit-cache-v7';
 const APP_SHELL = [
   './manifest.webmanifest',
   './assets/primecredit-icon.svg',
