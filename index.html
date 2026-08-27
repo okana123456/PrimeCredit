@@ -362,7 +362,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'primecredit-2026-08-22-c2b-callback-v10';
+const APP_VERSION = 'primecredit-2026-08-27-demand-letter-v11';
 const SUPABASE_URL = 'https://ahzdlgsdpmltrlhbervv.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFoemRsZ3NkcG1sdHJsaGJlcnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNDc3MjIsImV4cCI6MjA5OTgyMzcyMn0.Exj4iqLayPtQQHk1y7ZWQAT8i93fsRjz1Kwe_2mNtFU';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -2383,6 +2383,20 @@ async function viewClient(id){
     const{data:c}=await sb('loan_clients').select('*').eq('id',id).single();
     const{data:cLoans}=await sb('loans').select('*').eq('client_id',id);
     if(!c)return toast('Client not found','error');
+    const clientLoanIds=(cLoans||[]).map(l=>l.id);
+    let clientSchedules=[];
+    if(clientLoanIds.length){
+      const{data,error}=await sb('loan_schedules').select('loan_id,due_date,total_due,total_paid').in('loan_id',clientLoanIds);
+      if(error)throw error;
+      clientSchedules=data||[];
+    }
+    const historyArrears=l=>{
+      if(l.status!=='active'||Number(l.outstanding_balance||0)<=0.01)return 0;
+      const todayStr=today();
+      if(l.maturity_date&&String(l.maturity_date)<todayStr)return Number(l.outstanding_balance||0);
+      return clientSchedules.filter(s=>s.loan_id===l.id&&String(s.due_date)<todayStr)
+        .reduce((sum,s)=>sum+Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0)),0);
+    };
     const photoInputId = `clientPhotoInput_${String(c.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
     const assetInputId = `clientAssetInput_${String(c.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
     const assetPhotos = clientAssetPaths(c);
@@ -2442,21 +2456,25 @@ async function viewClient(id){
           <div class="kpi-value" style="font-size:14px;color:var(--accent-yellow)">${fmtMoney((cLoans||[]).filter(l=>l.status==='active').reduce((s,l)=>s+Number(l.outstanding_balance||0),0))}</div>
         </div>
       </div>
-      <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Principal</th><th>Weekly</th><th>Balance</th><th>Maturity</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Disbursed</th><th>Principal</th><th>Total Payable</th><th>Paid</th><th>Balance</th><th>Arrears</th><th>Maturity</th><th>Status</th><th>Actions</th></tr></thead><tbody>
       ${(cLoans||[]).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).map(l=>`
         <tr style="${l.status==='active'&&l.outstanding_balance>0?'':'opacity:0.6'}">
           <td><strong>${l.loan_no||'-'}</strong></td>
+          <td style="white-space:nowrap;font-size:12px">${fmtDate(l.disbursement_date||l.created_at)}</td>
           <td>${fmtMoney(l.principal_amount)}</td>
-          <td>${fmtMoney(l.weekly_installment)}</td>
+          <td>${fmtMoney(l.total_payable)}</td>
+          <td style="color:var(--accent-green)">${fmtMoney(l.total_paid)}</td>
           <td><strong style="color:${l.outstanding_balance>0?'var(--accent-yellow)':'var(--accent-green)'}">${fmtMoney(l.outstanding_balance)}</strong></td>
+          <td style="color:${historyArrears(l)>0?'var(--accent-red)':'var(--text-secondary)'}">${fmtMoney(historyArrears(l))}</td>
           <td style="white-space:nowrap;font-size:12px">${fmtDate(l.maturity_date)}</td>
           <td>${statusBadge(l.status)}${l.overdue_days>0?` <span class="badge badge-red" style="font-size:10px">${l.overdue_days}d</span>`:''}</td>
           <td style="white-space:nowrap">
             <button class="btn btn-outline btn-sm" onclick="closeModal();viewLoan('${l.id}')">View</button>
+            ${l.status==='active'&&Number(l.outstanding_balance||0)>0.01?`<button class="btn btn-outline btn-sm" onclick="closeModal();openDemandLetter('${l.id}')">Demand Letter</button>`:''}
             ${hasRole('admin','branch_manager')?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-yellow);color:var(--accent-yellow)" onclick="closeModal();openEditLoanModal('${l.id}')">Edit</button>`:''}
             ${hasRole('admin')?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-red);color:var(--accent-red)" onclick="closeModal();deleteLoanConfirm('${l.id}','${l.loan_no}')">Delete</button>`:''}
           </td>
-        </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);padding:20px">No loans</td></tr>'}
+        </tr>`).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--text-secondary);padding:20px">No loans</td></tr>'}
       </tbody></table></div>
       <div class="modal-actions">
         ${hasRole('admin','branch_manager')?`<button class="btn btn-outline" onclick="editClient('${c.id}')">✏️ Edit Client</button>`:''}
@@ -3422,6 +3440,8 @@ function showAllLoans(show){
 function renderLoanRows(loans){
   return loans.map(l=>{
     const rowColor=l.overdue_days>30?'border-left:3px solid var(--accent-red)':l.overdue_days>0?'border-left:3px solid var(--accent-orange)':l.status==='active'?'border-left:3px solid var(--accent-green)':'';
+    const menuId=`activeLoanActions_${String(l.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
+    const canPay=Number(l.outstanding_balance)>0&&hasRole('admin','branch_manager','cashier');
     return`<tr style="${rowColor}">
       <td><strong>${l.loan_no||'-'}</strong></td>
       <td><strong>${l.loan_clients?.full_name||'—'}</strong></td>
@@ -3431,7 +3451,18 @@ function renderLoanRows(loans){
       <td>${fmtMoney(l.principal_amount)}</td><td>${fmtMoney(l.outstanding_balance)}</td>
       <td>${fmtMoney(l.weekly_installment)}</td><td>${l.overdue_days>0?`<span class="badge badge-red">${l.overdue_days}d</span>`:'-'}</td>
       <td>${statusBadge(l.status)}</td>
-      <td><button class="btn btn-outline btn-sm" onclick="viewLoan('${l.id}')">View</button> ${(Number(l.outstanding_balance) <= 0) ? '<span class="badge badge-green">Paid in Full</span>' : (hasRole('admin','branch_manager','cashier') ? `<button class="btn btn-success btn-sm" onclick="openPaymentModal('${l.id}')">Pay</button>` : '')}</td>
+      <td>
+        <div class="row-action-menu" id="${menuId}">
+          <button class="row-action-toggle" type="button" title="Loan actions" aria-label="Loan actions" onclick="toggleRowActionMenu('${menuId}',event)">⋮</button>
+          <div class="row-action-panel">
+            <button type="button" onclick="viewLoan('${l.id}')">View Loan</button>
+            <button type="button" onclick="viewClient('${l.client_id}')">Client Loan History</button>
+            ${l.status==='active'&&Number(l.outstanding_balance||0)>0.01?`<button type="button" onclick="openDemandLetter('${l.id}')">Demand Letter</button>`:''}
+            ${canPay?`<button type="button" class="success" onclick="openPaymentModal('${l.id}')">Record Payment</button>`:''}
+            ${Number(l.outstanding_balance)<=0?'<button type="button" disabled>Paid in Full</button>':''}
+          </div>
+        </div>
+      </td>
     </tr>`}).join('');
 }
 
@@ -3469,7 +3500,7 @@ function filterLoanStatus(v){
 }
 
 async function viewLoan(id){
-  const{data:loan}=await sb('loans').select('*,loan_clients(full_name,phone)').eq('id',id).single();
+  const{data:loan}=await sb('loans').select('*,loan_clients(*)').eq('id',id).single();
   const{data:schedules}=await sb('loan_schedules').select('*').eq('loan_id',id).order('installment_no');
   const{data:payments}=await sb('loan_repayments').select('*').eq('loan_id',id).order('payment_date',{ascending:true}).order('created_at',{ascending:true});
   const{data:loanPenalties}=await sb('loan_penalties').select('*').eq('loan_id',id).order('date_charged',{ascending:true});
@@ -3534,6 +3565,8 @@ async function viewLoan(id){
     </div>
     <div class="modal-actions">
       <button class="btn btn-outline btn-sm" onclick="viewClientPayments('${loan.id}')">💳 Payments</button>
+      <button class="btn btn-outline btn-sm" onclick="closeModal();viewClient('${loan.client_id}')">Loan History</button>
+      ${loan.status==='active'&&Number(loan.outstanding_balance||0)>0.01?`<button class="btn btn-outline btn-sm" onclick="openDemandLetter('${loan.id}')">Demand Letter</button>`:''}
       <button class="btn btn-outline btn-sm" onclick="exportLoanPDF('${loan.id}')">Export PDF</button>
       ${hasRole('admin','branch_manager')?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-yellow);color:var(--accent-yellow)" onclick="openEditLoanModal('${loan.id}')">✏️ Edit Loan</button>`:''}
       ${hasRole('admin')?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-red);color:var(--accent-red)" onclick="deleteLoanConfirm('${loan.id}','${loan.loan_no}')">🗑 Delete</button>`:''}
@@ -3541,6 +3574,78 @@ async function viewLoan(id){
       <button class="btn btn-outline" onclick="closeModal()">Close</button>
     </div>
   `,true);
+}
+
+async function openDemandLetter(loanId){
+  const letterWindow=window.open('','_blank','width=920,height=900,scrollbars=yes,resizable=yes');
+  if(!letterWindow){toast('Please allow pop-ups to open the demand letter','warning');return;}
+  letterWindow.opener=null;
+  letterWindow.document.write('<!doctype html><html><head><title>Preparing demand letter...</title></head><body style="font-family:Arial,sans-serif;padding:40px">Preparing demand letter...</body></html>');
+  letterWindow.document.close();
+  try{
+    const [{data:loan,error:loanError},{data:schedules,error:scheduleError},{data:payments,error:paymentError},{data:settings,error:settingsError}]=await Promise.all([
+      sb('loans').select('*,loan_clients(*)').eq('id',loanId).eq('business_id',currentUser.business_id).single(),
+      sb('loan_schedules').select('*').eq('loan_id',loanId).eq('business_id',currentUser.business_id).order('due_date',{ascending:true}),
+      sb('loan_repayments').select('amount').eq('loan_id',loanId).eq('business_id',currentUser.business_id),
+      sb('loan_settings').select('*').eq('business_id',currentUser.business_id).maybeSingle()
+    ]);
+    if(loanError)throw loanError;
+    if(scheduleError)throw scheduleError;
+    if(paymentError)throw paymentError;
+    if(settingsError)throw settingsError;
+    if(!loan)throw new Error('Loan not found');
+
+    let officer=null;
+    if(loan.loan_officer_id){
+      const{data,error}=await sb('loan_staff').select('name,phone,email').eq('id',loan.loan_officer_id).eq('business_id',currentUser.business_id).maybeSingle();
+      if(error)throw error;
+      officer=data;
+    }
+
+    const client=loan.loan_clients||{};
+    const todayStr=today();
+    const deadlineDate=parseLocalDate(todayStr);
+    deadlineDate.setDate(deadlineDate.getDate()+14);
+    const deadlineStr=localISODate(deadlineDate);
+    const repaymentTotal=(payments||[]).reduce((sum,p)=>sum+Number(p.amount||0),0);
+    const paidAmount=Math.max(repaymentTotal,Number(loan.total_paid||0));
+    const outstanding=Math.max(0,Number(loan.outstanding_balance||0));
+    const scheduleArrears=(schedules||[]).filter(s=>String(s.due_date)<todayStr).reduce((sum,s)=>sum+Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0)),0);
+    const pastMaturity=Boolean(loan.maturity_date&&String(loan.maturity_date)<todayStr&&outstanding>0.01);
+    const arrears=pastMaturity?Math.max(scheduleArrears,outstanding):scheduleArrears;
+    const company=settings||appSettings||{};
+    const groupLabel=client.group_name||loan.group_name||client.employer||'Individual Client';
+    const esc=escapeHtml;
+    const longDate=value=>parseLocalDate(value)?.toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})||'-';
+    const money=value=>'KES '+Number(value||0).toLocaleString('en-KE',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const companyName=company.company_name||'PrimeCredit';
+    const documentHtml=`<!doctype html>
+<html><head><meta charset="utf-8"><title>Demand Letter - ${esc(client.full_name||loan.loan_no)}</title>
+<style>
+@page{size:A4;margin:16mm}*{box-sizing:border-box}body{margin:0;background:#eef2f7;color:#111827;font-family:Arial,Helvetica,sans-serif;font-size:11.5pt;line-height:1.55}.toolbar{position:sticky;top:0;z-index:2;display:flex;justify-content:center;gap:10px;padding:12px;background:#172554}.toolbar button{border:0;border-radius:5px;padding:10px 16px;font-weight:700;cursor:pointer}.print{background:#facc15;color:#172554}.close{background:#fff;color:#172554}.sheet{width:210mm;min-height:297mm;margin:18px auto;background:#fff;padding:18mm 19mm;box-shadow:0 8px 30px rgba(15,23,42,.18)}.letterhead{text-align:center;border-bottom:2px solid #172554;padding-bottom:12px;margin-bottom:22px}.letterhead h1{font-size:20pt;margin:0;color:#172554}.letterhead p{margin:2px 0;font-size:9.5pt}.meta{display:flex;justify-content:space-between;gap:20px;margin-bottom:20px}.subject{font-weight:800;text-decoration:underline;margin:20px 0 14px}.amounts{width:100%;border-collapse:collapse;margin:16px 0}.amounts td{border:1px solid #cbd5e1;padding:8px 10px}.amounts td:first-child{font-weight:700;width:62%;background:#f8fafc}.deadline{border-left:4px solid #dc2626;background:#fef2f2;padding:10px 12px;font-weight:700;margin:18px 0}.signature{margin-top:36px}.muted{color:#475569;font-size:9.5pt}@media print{body{background:#fff}.toolbar{display:none}.sheet{width:auto;min-height:auto;margin:0;padding:0;box-shadow:none}}
+</style></head><body>
+<div class="toolbar"><button class="print" onclick="window.print()">Print / Save PDF</button><button class="close" onclick="window.close()">Close</button></div>
+<main class="sheet">
+  <header class="letterhead"><h1>${esc(companyName)}</h1><p>${esc(company.company_address||'')}</p><p>${esc(company.company_phone||'')}${company.company_email?' | '+esc(company.company_email):''}</p></header>
+  <div class="meta"><div><strong>To:</strong><br>${esc(client.full_name||'-')}<br>ID: ${esc(client.id_number||'-')}<br>Phone: ${esc(client.phone||'-')}<br>${esc(client.address||'')}</div><div><strong>Date:</strong> ${longDate(todayStr)}<br><strong>Loan Account:</strong> ${esc(loan.loan_no||'-')}</div></div>
+  <div>Dear ${esc(client.full_name||'Client')},</div>
+  <div class="subject">RE: FORMAL DEMAND FOR PAYMENT OF OUTSTANDING LOAN</div>
+  <p>We refer to the loan advanced to you under the account shown above. Our records indicate that the loan has an unpaid balance and requires your immediate attention.</p>
+  <table class="amounts"><tr><td>Member / Client</td><td>${esc(client.full_name||'-')}</td></tr><tr><td>Group / Employer</td><td>${esc(groupLabel)}</td></tr><tr><td>Loan Officer</td><td>${esc(officer?.name||'Unassigned')}</td></tr><tr><td>Principal Amount</td><td>${money(loan.principal_amount)}</td></tr><tr><td>Total Amount Paid</td><td>${money(paidAmount)}</td></tr><tr><td>Arrears as at ${longDate(todayStr)}</td><td>${money(arrears)}</td></tr><tr><td>Outstanding Loan Balance</td><td><strong>${money(outstanding)}</strong></td></tr><tr><td>Original Maturity Date</td><td>${longDate(loan.maturity_date)}</td></tr></table>
+  <p>You are hereby required to pay the outstanding amount or contact our office to agree on an acceptable settlement arrangement.</p>
+  <div class="deadline">Payment or a formal repayment arrangement must be made within fourteen (14) days, on or before ${longDate(deadlineStr)}.</div>
+  <p>If you have already made a payment that is not reflected above, please provide the payment reference to our office for reconciliation.</p>
+  <div class="signature"><p>Yours faithfully,</p><br><strong>${esc(officer?.name||companyName)}</strong><br>${officer?.name?'Loan Officer':'For '+esc(companyName)}<br>${esc(officer?.phone||company.company_phone||'')}</div>
+  <p class="muted">This letter was generated from PrimeCredit using the loan account information available on ${longDate(todayStr)}.</p>
+</main></body></html>`;
+    letterWindow.document.open();
+    letterWindow.document.write(documentHtml);
+    letterWindow.document.close();
+    letterWindow.focus();
+  }catch(e){
+    letterWindow.close();
+    toast(e.message||'Could not prepare demand letter','error');
+  }
 }
 
 function showLoanTab(tab,el){
@@ -4347,7 +4452,7 @@ async function renderOverdue(opts){
     if(loanIds.length){
       const{data:scheds}=await sb('loan_schedules')
         .select('*').in('loan_id',loanIds)
-        .lte('due_date',asOfDate)
+        .lt('due_date',asOfDate)
         .order('due_date',{ascending:true});
       allScheds=scheds||[];
     }
@@ -4356,7 +4461,8 @@ async function renderOverdue(opts){
     const loanMap={};
     (loans||[]).forEach(l=>{ loanMap[l.id]=l; });
 
-    // Missed installments: due on or before asOfDate, with unpaid balance
+    // Arrears are strictly before asOfDate. An installment due on the
+    // report date remains a current due and only becomes arrears tomorrow.
     const missed=allScheds.filter(s=>{
       const unpaid=Number(s.total_due||0)-Number(s.total_paid||0);
       return unpaid>0.01 && ['pending','partial','overdue'].includes(s.status);
@@ -4378,7 +4484,10 @@ async function renderOverdue(opts){
       const oldest=new Date(loanArrears[lid].oldest);
       const asOf=new Date(asOfDate);
       const daysOld=Math.floor((asOf-oldest)/(1000*60*60*24));
-      return {...loan, _asof_days:daysOld, _asof_arrears:loanArrears[lid].arrears, _scheds:loanArrears[lid].scheds};
+      const pastMaturity=Boolean(loan.maturity_date&&String(loan.maturity_date)<asOfDate&&Number(loan.outstanding_balance||0)>0.01);
+      const arrearsAmount=pastMaturity?Math.max(Number(loan.outstanding_balance||0),loanArrears[lid].arrears):loanArrears[lid].arrears;
+      const maturityDays=pastMaturity?Math.max(1,Math.floor((parseLocalDate(asOfDate)-parseLocalDate(loan.maturity_date))/(1000*60*60*24))):0;
+      return {...loan, _asof_days:Math.max(daysOld,maturityDays), _asof_arrears:arrearsAmount, _past_maturity:pastMaturity, _scheds:loanArrears[lid].scheds};
     }).filter(Boolean);
 
     // ── Fallback: include any active loan with arrears_amount > 0 or overdue_days > 0
@@ -4387,11 +4496,12 @@ async function renderOverdue(opts){
     const fallbackLoans=(loans||[]).filter(l=>
       l.status==='active' &&
       !scheduleCapturedIds.has(l.id) &&
-      (Number(l.arrears_amount||0)>0 || Number(l.overdue_days||0)>0)
+      (Number(l.overdue_days||0)>0 || (l.maturity_date&&String(l.maturity_date)<asOfDate&&Number(l.outstanding_balance||0)>0.01))
     ).map(l=>({
       ...l,
-      _asof_days:Number(l.overdue_days||0),
-      _asof_arrears:Number(l.arrears_amount||0),
+      _asof_days:Math.max(Number(l.overdue_days||0),l.maturity_date?Math.max(1,Math.floor((parseLocalDate(asOfDate)-parseLocalDate(l.maturity_date))/(1000*60*60*24))):0),
+      _asof_arrears:(l.maturity_date&&String(l.maturity_date)<asOfDate&&Number(l.outstanding_balance||0)>0.01)?Math.max(Number(l.arrears_amount||0),Number(l.outstanding_balance||0)):Number(l.arrears_amount||0),
+      _past_maturity:Boolean(l.maturity_date&&String(l.maturity_date)<asOfDate&&Number(l.outstanding_balance||0)>0.01),
       _scheds:[]
     }));
     overdueLoans=overdueLoans.concat(fallbackLoans);
@@ -4404,7 +4514,7 @@ async function renderOverdue(opts){
     const allActive=(loans||[]).filter(l=>l.status==='active');
     const portfolio=allActive.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
     const buckets=[0,0,0,0,0];
-    overdueLoans.forEach(l=>{const d=Number(l.overdue_days||0);if(d<=30)buckets[0]++;else if(d<=60)buckets[1]++;else if(d<=90)buckets[2]++;else if(d<=180)buckets[3]++;else buckets[4]++;});
+    overdueLoans.forEach(l=>{const d=Number(l._asof_days!=null?l._asof_days:l.overdue_days||0);if(d<=30)buckets[0]++;else if(d<=60)buckets[1]++;else if(d<=90)buckets[2]++;else if(d<=180)buckets[3]++;else buckets[4]++;});
     const totalArrears=overdueLoans.reduce((s,l)=>s+Number(l._asof_arrears!=null?l._asof_arrears:l.arrears_amount||0),0);
 
     // Build missed installment rows (flat)
@@ -4523,9 +4633,9 @@ async function renderOverdue(opts){
     summaryHtml += '</tbody></table></div>';
 
     // ── 4. PAR metrics ──
-    var par30pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l.overdue_days||0)>30;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
-    var par60pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l.overdue_days||0)>60;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
-    var par90pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l.overdue_days||0)>90;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
+    var par30pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l._asof_days!=null?l._asof_days:l.overdue_days||0)>30;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
+    var par60pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l._asof_days!=null?l._asof_days:l.overdue_days||0)>60;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
+    var par90pct = portfolio>0?((overdueLoans.filter(function(l){return Number(l._asof_days!=null?l._asof_days:l.overdue_days||0)>90;}).reduce(function(s,l){return s+Number(l.outstanding_balance||0);},0))/portfolio*100).toFixed(1):'0';
     var parHtml =
       '<div style="padding:12px 14px;font-size:13px;display:flex;gap:24px;flex-wrap:wrap">' +
         '<span><strong>PAR 30:</strong> '+par30pct+'%</span>' +
