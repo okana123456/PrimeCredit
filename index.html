@@ -362,7 +362,7 @@ tr:hover{background:rgba(37,99,235,.04)}
 
 <script>
 // ═══ SUPABASE INIT ═══
-const APP_VERSION = 'primecredit-2026-08-27-demand-letter-v11';
+const APP_VERSION = 'primecredit-2026-08-27-dues-forecast-v12';
 const SUPABASE_URL = 'https://ahzdlgsdpmltrlhbervv.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFoemRsZ3NkcG1sdHJsaGJlcnZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyNDc3MjIsImV4cCI6MjA5OTgyMzcyMn0.Exj4iqLayPtQQHk1y7ZWQAT8i93fsRjz1Kwe_2mNtFU';
 // Added custom storageKey to prevent GoTrue orphaned lock hanging in the browser.
@@ -1474,6 +1474,7 @@ function buildSidebar() {
     { id: 'disbursement', icon: '$', label: 'Disbursement', roles: ['admin', 'branch_manager', 'cashier'] },
     { id: 'loans', icon: 'L', label: 'Active Loans', roles: ['admin', 'branch_manager', 'loan_officer', 'cashier'] },
     { id: 'repayments', icon: 'R', label: 'Repayments', roles: ['admin', 'branch_manager', 'cashier', 'loan_officer'] },
+    { id: 'dues_forecast', icon: 'D', label: 'Dues/Forecast', roles: ['admin', 'branch_manager', 'loan_officer'] },
     { id: 'overdue', icon: '!', label: 'Arrears', roles: ['admin', 'branch_manager', 'loan_officer'] },
     
     { isHeader: true, label: 'Management', roles: ['admin', 'branch_manager'] },
@@ -1670,7 +1671,7 @@ function navigateTo(section){
   const renderers={
     dashboard:renderDashboard,clients:renderClients,products:renderProducts,
     applications:renderApplications,disbursement:renderDisbursement,loans:renderLoans,
-    repayments:renderRepayments,overdue:renderOverdue,reports:renderReports,officer_performance:renderOfficerPerformance,officer_dashboard:renderOfficerDashboard,suspense:renderSuspense,
+    repayments:renderRepayments,dues_forecast:renderDuesForecast,overdue:renderOverdue,reports:renderReports,officer_performance:renderOfficerPerformance,officer_dashboard:renderOfficerDashboard,suspense:renderSuspense,
     accounting:renderAccounting,staff:renderStaff,calculator:renderCalculator,
     settings:renderSettings,auditlog:renderAuditLog
   };
@@ -1947,9 +1948,20 @@ async function renderDashboard(){
     const active=myLoans.filter(l=>l.status==='active');
     const portfolio=active.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
     const outstanding=active.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
-    const overdue=active.filter(l=>l.overdue_days>0);
-    const par30=active.filter(l=>l.overdue_days>30);
-    const npl=active.filter(l=>l.overdue_days>180);
+    const overdue=active.map(l=>{
+      const pastDue=(allScheds||[]).filter(s=>s.loan_id===l.id&&String(s.due_date)<todayStr&&Number(s.total_due||0)>Number(s.total_paid||0));
+      const scheduleArrears=pastDue.reduce((sum,s)=>sum+Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0)),0);
+      const pastMaturity=Boolean(l.maturity_date&&String(l.maturity_date)<todayStr&&Number(l.outstanding_balance||0)>0.01);
+      const arrears=pastMaturity?Math.max(scheduleArrears,Number(l.outstanding_balance||0)):scheduleArrears;
+      if(arrears<=0.01)return null;
+      const dates=pastDue.map(s=>String(s.due_date));
+      if(pastMaturity)dates.push(String(l.maturity_date));
+      dates.sort();
+      const days=Math.max(1,Math.floor((parseLocalDate(todayStr)-parseLocalDate(dates[0]))/(1000*60*60*24)));
+      return{...l,_dashboard_arrears:arrears,_dashboard_overdue_days:days};
+    }).filter(Boolean);
+    const par30=overdue.filter(l=>l._dashboard_overdue_days>30);
+    const npl=overdue.filter(l=>l._dashboard_overdue_days>180);
     const par30val=par30.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
     const par30pct=portfolio>0?(par30val/portfolio*100):0;
 
@@ -2102,7 +2114,7 @@ async function renderDashboard(){
       <h3 class="dash-h3">Global Portfolio Snapshot</h3>
       <div class="kpi-grid">
         <div class="kpi-card"><div class="kpi-label">OLB (Outstanding Balance)</div><div class="kpi-value" style="color:var(--accent-blue)">${fmtMoney(portfolio)}</div><div class="kpi-sub">${active.length} active loans</div></div>
-        <div class="kpi-card" style="cursor:pointer" onclick="navigateTo('overdue')"><div class="kpi-label">Loans in Arrears</div><div class="kpi-value" style="color:var(--accent-red)">${overdue.length}</div><div class="kpi-sub" style="color:var(--accent-red)">KES ${fmtMoney(overdue.reduce((s,l)=>s+Number(l.arrears_amount||0),0))} outstanding</div></div>
+        <div class="kpi-card" style="cursor:pointer" onclick="navigateTo('overdue')"><div class="kpi-label">Loans in Arrears</div><div class="kpi-value" style="color:var(--accent-red)">${overdue.length}</div><div class="kpi-sub" style="color:var(--accent-red)">${fmtMoney(overdue.reduce((s,l)=>s+Number(l._dashboard_arrears||0),0))} overdue</div></div>
         <div class="kpi-card"><div class="kpi-label">PAR 30</div><div class="kpi-value" style="color:${par30pct>10?'var(--accent-red)':'var(--accent-yellow)'}">${par30pct.toFixed(1)}%</div></div>
         <div class="kpi-card"><div class="kpi-label">NPL (>180 Days)</div><div class="kpi-value" style="color:var(--accent-red)">${npl.length}</div><div class="kpi-sub">Non-Performing Loans</div></div>
       </div>
@@ -4352,6 +4364,7 @@ async function savePayment(){
     if(currentSection==='repayments')renderRepayments();
     else if(currentSection==='loans')renderLoans();
     else if(currentSection==='dashboard')renderDashboard();
+    else if(currentSection==='dues_forecast')renderDuesForecast();
     else if(currentSection==='overdue')renderOverdue();
     // Always refresh dashboard data in background so KPIs are current
     if(currentSection!=='dashboard') renderDashboard();
@@ -4409,6 +4422,113 @@ function exportRepaymentsExcel(){
   XLSX.utils.book_append_sheet(wb,ws,'Repayments');
   XLSX.writeFile(wb,'PrimeCredit_Repayments.xlsx');
   toast('Exported','success');
+}
+
+// ═══ DUES / FORECAST ═══
+async function renderDuesForecast(startDate,endDate){
+  startDate=startDate||today();
+  endDate=endDate||startDate;
+  if(endDate<startDate){const swap=startDate;startDate=endDate;endDate=swap;}
+  const main=$('#mainContent');
+  try{
+    const isOfficerOnly=hasRole('loan_officer')&&!hasRole('admin','branch_manager');
+    let loansQuery=sb('loans').select('*,loan_clients(full_name,phone,id_number,address)')
+      .eq('business_id',currentUser.business_id).eq('status','active').gt('outstanding_balance',0.01);
+    if(isOfficerOnly)loansQuery=loansQuery.eq('loan_officer_id',currentUser.id);
+    const[{data:loans,error:loansError},{data:staff,error:staffError}]=await Promise.all([
+      loansQuery,
+      sb('loan_staff').select('id,name').eq('business_id',currentUser.business_id)
+    ]);
+    if(loansError)throw loansError;
+    if(staffError)throw staffError;
+    window._staffMap={};
+    (staff||[]).forEach(s=>{window._staffMap[s.id]=s.name;});
+
+    const activeLoans=loans||[];
+    const loanMap=new Map(activeLoans.map(l=>[l.id,l]));
+    let schedules=[];
+    let pastSchedules=[];
+    if(activeLoans.length){
+      const loanIds=activeLoans.map(l=>l.id);
+      const[rangeResult,pastResult]=await Promise.all([
+        sb('loan_schedules').select('*').in('loan_id',loanIds).gte('due_date',startDate).lte('due_date',endDate).order('due_date',{ascending:true}),
+        sb('loan_schedules').select('loan_id,due_date,total_due,total_paid').in('loan_id',loanIds).lt('due_date',today())
+      ]);
+      if(rangeResult.error)throw rangeResult.error;
+      if(pastResult.error)throw pastResult.error;
+      schedules=rangeResult.data||[];
+      pastSchedules=pastResult.data||[];
+    }
+    activeLoans.forEach(loan=>{
+      const scheduleArrears=pastSchedules.filter(s=>s.loan_id===loan.id)
+        .reduce((sum,s)=>sum+Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0)),0);
+      const pastMaturity=Boolean(loan.maturity_date&&String(loan.maturity_date)<today()&&Number(loan.outstanding_balance||0)>0.01);
+      loan._asof_arrears=pastMaturity?Math.max(scheduleArrears,Number(loan.outstanding_balance||0)):scheduleArrears;
+    });
+    const dueRows=schedules.map(s=>{
+      const loan=loanMap.get(s.loan_id);
+      if(!loan)return null;
+      const paid=Number(s.total_paid||0);
+      const remaining=Math.max(0,Number(s.total_due||0)-paid);
+      return{loan,s,paid,remaining};
+    }).filter(Boolean).sort((a,b)=>String(a.s.due_date).localeCompare(String(b.s.due_date))||b.remaining-a.remaining);
+
+    const expected=dueRows.reduce((sum,r)=>sum+Number(r.s.total_due||0),0);
+    const paid=dueRows.reduce((sum,r)=>sum+Math.min(Number(r.s.total_due||0),r.paid),0);
+    const remaining=Math.max(0,expected-paid);
+    const paidCount=dueRows.filter(r=>r.remaining<=0.01).length;
+    const unpaidCount=dueRows.length-paidCount;
+    const isForecast=startDate>today();
+    const rangeLabel=startDate===endDate?fmtDate(startDate):fmtDate(startDate)+' to '+fmtDate(endDate);
+    window._duesForecastSnapshot={
+      dueRows,
+      asOfDuesStartDate:startDate,
+      asOfDuesEndDate:endDate,
+      asOfDuesDate:startDate===endDate?startDate:startDate+'_to_'+endDate
+    };
+
+    main.innerHTML=`
+      <div class="page-header" style="align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div><h1>Dues/Forecast Report</h1><div style="font-size:12px;color:var(--text-secondary);margin-top:3px">Scheduled loan collections for ${rangeLabel}</div></div>
+        <button class="btn btn-primary btn-sm" onclick="downloadDuesExcel()">Download Excel</button>
+      </div>
+      <div class="card" style="margin-bottom:12px">
+        <div style="display:flex;align-items:end;gap:10px;flex-wrap:wrap">
+          <div class="form-group" style="margin:0"><label>From</label><input type="date" id="forecastStartDate" class="input" value="${startDate}"></div>
+          <div class="form-group" style="margin:0"><label>To</label><input type="date" id="forecastEndDate" class="input" value="${endDate}"></div>
+          <button class="btn btn-primary btn-sm" onclick="renderDuesForecast(document.getElementById('forecastStartDate').value,document.getElementById('forecastEndDate').value)">Apply</button>
+          <button class="btn btn-outline btn-sm" onclick="setDuesForecastRange('today')">Today</button>
+          <button class="btn btn-outline btn-sm" onclick="setDuesForecastRange('tomorrow')">Tomorrow</button>
+          <button class="btn btn-outline btn-sm" onclick="setDuesForecastRange('week')">This Week</button>
+          <button class="btn btn-outline btn-sm" onclick="setDuesForecastRange('month')">This Month</button>
+        </div>
+      </div>
+      <div class="kpi-grid">
+        <div class="kpi-card" style="border-top:3px solid var(--accent-blue)"><div class="kpi-label">${isForecast?'Forecast':'Expected'}</div><div class="kpi-value" style="color:var(--accent-blue)">${fmtMoney(expected)}</div><div class="kpi-sub">${dueRows.length} scheduled installment${dueRows.length===1?'':'s'}</div></div>
+        <div class="kpi-card" style="border-top:3px solid var(--accent-green)"><div class="kpi-label">Paid Against Dues</div><div class="kpi-value" style="color:var(--accent-green)">${fmtMoney(paid)}</div><div class="kpi-sub">${paidCount} paid</div></div>
+        <div class="kpi-card" style="border-top:3px solid var(--accent-red)"><div class="kpi-label">Remaining</div><div class="kpi-value" style="color:var(--accent-red)">${fmtMoney(remaining)}</div><div class="kpi-sub">${unpaidCount} unpaid or partial</div></div>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden">
+        <div style="padding:12px 14px;border-bottom:1px solid var(--border);font-weight:700">Clients Due</div>
+        <div id="duesClientTable">${buildDuesTable(dueRows)}</div>
+      </div>`;
+  }catch(e){console.error(e);toast(e.message||'Could not load dues forecast','error');}
+}
+
+function setDuesForecastRange(range){
+  const now=parseLocalDate(today());
+  let start=new Date(now),end=new Date(now);
+  if(range==='tomorrow'){start.setDate(start.getDate()+1);end=new Date(start);}
+  if(range==='week'){
+    const day=start.getDay()||7;
+    start.setDate(start.getDate()-day+1);
+    end=new Date(start);end.setDate(end.getDate()+6);
+  }
+  if(range==='month'){
+    start=new Date(now.getFullYear(),now.getMonth(),1);
+    end=new Date(now.getFullYear(),now.getMonth()+1,0);
+  }
+  renderDuesForecast(localISODate(start),localISODate(end));
 }
 
 // ═══ ARREARS REPORT (formerly Overdue) ═══
@@ -4528,18 +4648,7 @@ async function renderOverdue(opts){
     });
     missedRows.sort((a,b)=>b.daysOld-a.daysOld);
 
-    // Store for download
-    // Also fetch dues for the selected date for the dues-by-date section
-    const{data:dueScheds}=await sb('loan_schedules')
-      .select('*').eq('business_id',currentUser.business_id).eq('due_date',asOfDate);
-    const dueRows=(dueScheds||[]).map(s=>{
-      const loan=loanMap[s.loan_id];
-      if(!loan)return null;
-      const remaining=Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0));
-      return{loan,s,remaining,paid:Number(s.total_paid||0)};
-    }).filter(Boolean).sort((a,b)=>b.remaining-a.remaining);
-
-    window._overdueSnapshot={asOfDate,overdueLoans,missedRows,dueRows};
+    window._overdueSnapshot={asOfDate,overdueLoans,missedRows};
 
     // ── Build arrears page using safe string concatenation (no nested backticks) ──
     function makeSection(id, title, count, amtStr, bodyHtml, btnHtml){
@@ -4559,24 +4668,7 @@ async function renderOverdue(opts){
       '</div>';
     }
 
-    // ── 1. Dues by Date table (same format as dashboard) ──
-    const duesTable = buildDuesTable(dueRows);
-    const duesTotal = dueRows.reduce(function(s,r){return s+Number(r.s.total_due||0);},0);
-    const duesUnpaid = dueRows.filter(function(r){return r.remaining>0;}).length;
-    const duesPaid   = dueRows.filter(function(r){return r.remaining===0;}).length;
-    const duesAmtStr = 'KES '+fmtMoney(duesTotal)+' · '+duesUnpaid+' unpaid · '+duesPaid+' paid';
-
-    const duesHeader =
-      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px 10px;border-bottom:1px solid var(--border)">' +
-        '<span style="font-size:12px;color:var(--text-secondary)">From:</span>' +
-        '<input type="date" id="duesStartDate" class="input" style="width:150px;padding:4px 8px;font-size:12px;font-weight:600" value="'+asOfDate+'" onchange="loadArrearsDues(document.getElementById(\'duesStartDate\').value,document.getElementById(\'duesEndDate\').value)">' +
-        '<span style="font-size:12px;color:var(--text-secondary)">To:</span>' +
-        '<input type="date" id="duesEndDate" class="input" style="width:150px;padding:4px 8px;font-size:12px;font-weight:600" value="'+asOfDate+'" onchange="loadArrearsDues(document.getElementById(\'duesStartDate\').value,document.getElementById(\'duesEndDate\').value)">' +
-        '<span id="duesDateSummary" style="font-size:12px;color:var(--text-secondary)">'+duesAmtStr+'</span>' +
-      '</div>' +
-      '<div id="duesClientTable" style="padding:0 0 4px">'+duesTable+'</div>';
-
-    // ── 2. Missed Installments table ──
+    // ── Missed Installments table ──
     let missedHtml = '<div class="table-wrap"><table style="font-size:12px"><thead><tr>' +
       '<th>Client</th><th>Phone</th><th>Loan #</th><th>Inst #</th><th>Due Date</th><th>Amount Due</th><th>Paid</th><th>Remaining</th><th>Arrears</th><th>Loan Balance</th><th>Officer</th><th>Days Overdue</th><th>Actions</th>' +
       '</tr></thead><tbody>';
@@ -4669,19 +4761,17 @@ async function renderOverdue(opts){
           '<span class="badge badge-red">'+overdueLoans.length+' loan'+(overdueLoans.length!==1?'s':'')+' &nbsp;·&nbsp; KES '+fmtMoney(totalArrears)+' in arrears</span>' +
         '</div>' +
       '</div>' +
-      // Section 1: Dues by date (open by default)
-      makeSection('dues', '📋 Clients Due On Date', dueRows.length, duesAmtStr, duesHeader, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadDuesExcel()">⬇ Excel</button>') +
-      // Section 2: Missed installments (open by default)
+      // Missed installments (open by default)
       makeSection('missed', '⚠️ Missed Installments — as of '+asOfDate, missedRows.length, 'KES '+fmtMoney(missedArrears)+' unpaid', missedHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadMissedExcel()">⬇ Excel</button>') +
-      // Section 3: Loan summary (collapsed by default)
+      // Loan summary (collapsed by default)
       makeSection('loansummary', '📊 Loan-Level Arrears Summary', overdueLoans.length, 'KES '+fmtMoney(totalArrears), summaryHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadArrearsSummaryExcel()">⬇ Excel</button>') +
-      // Section 4: PAR / Chart (collapsed by default)
+      // PAR / Chart (collapsed by default)
       makeSection('parchart', '📈 Aging Buckets & PAR Metrics', null, 'PAR30: '+par30pct+'%  PAR60: '+par60pct+'%  PAR90: '+par90pct+'%', parHtml);
 
     main.innerHTML = pageHtml;
 
-    // Open first two sections by default
-    ['dues','missed'].forEach(function(id){
+    // Open missed installments by default
+    ['missed'].forEach(function(id){
       var body = document.getElementById('arr-body-'+id);
       var icon = document.getElementById('arr-icon-'+id);
       if(body){ body.style.maxHeight = body.scrollHeight+'px'; }
@@ -4703,21 +4793,22 @@ function toggleSection(id){
 }
 
 function buildDuesTable(dueRows){
-  // Only show unpaid/partial rows — exclude fully paid installments
-  const filteredRows = (dueRows||[]).filter(function(r){return r.remaining>0;});
-  if(!filteredRows.length) return '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px">✅ All installments for this date are paid</div>';
+  const filteredRows=dueRows||[];
+  if(!filteredRows.length)return '<div style="text-align:center;padding:20px;color:var(--text-secondary);font-size:12px">No installments scheduled for this date range</div>';
   var html = '<div class="table-wrap"><table style="font-size:12px"><thead><tr>';
   html += '<th>Client</th><th>Phone</th><th>Loan #</th><th>Inst #</th><th>Amount Due</th><th>Paid</th><th>Remaining</th><th>Arrears</th><th>Loan Balance</th><th>Officer</th><th>Status</th><th></th>';
   html += '</tr></thead><tbody>';
   filteredRows.forEach(function(item){
     var loan=item.loan, s=item.s, remaining=item.remaining, paid=item.paid;
-    var arrears=Number(loan.arrears_amount||0);
+    var arrears=Number(loan._asof_arrears!=null?loan._asof_arrears:loan.arrears_amount||0);
     var loanBalance=Number(loan.outstanding_balance||0);
     var isPartial = paid>0 && remaining>0;
-    var badge = isPartial
-      ? '<span class="badge" style="background:var(--accent-orange);color:#fff">Partial</span>'
-      : '<span class="badge badge-red">Unpaid</span>';
-    var payBtn = hasRole('admin','branch_manager','cashier')
+    var badge = remaining<=0.01
+      ? '<span class="badge badge-green">Paid</span>'
+      : isPartial
+        ? '<span class="badge" style="background:var(--accent-orange);color:#fff">Partial</span>'
+        : '<span class="badge badge-red">Unpaid</span>';
+    var payBtn = remaining>0.01&&hasRole('admin','branch_manager','cashier')
       ? '<button class="btn btn-success btn-sm" onclick="openPaymentModal(\''+loan.id+'\')">Pay</button>' : '';
     var arrearsCell = arrears > 0
       ? '<td style="color:var(--accent-red);font-weight:700">'+fmtMoney(arrears)+'</td>'
@@ -4794,7 +4885,7 @@ async function loadArrearsDues(startDate, endDate){
 }
 
 function downloadDuesExcel(){
-  const snap=window._overdueSnapshot;
+  const snap=window._duesForecastSnapshot||window._overdueSnapshot;
   if(!snap){toast('No data to download','error');return;}
   const startDate=snap.asOfDuesStartDate||snap.asOfDuesDate||snap.asOfDate;
   const endDate=snap.asOfDuesEndDate||startDate;
