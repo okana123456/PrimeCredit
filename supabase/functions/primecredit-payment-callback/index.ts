@@ -41,6 +41,16 @@ function mpesaDate(value: unknown) {
   return new Date().toISOString();
 }
 
+function daysBetween(from: string, to: string) {
+  const start = new Date(`${from.slice(0, 10)}T00:00:00Z`).getTime();
+  const end = new Date(`${to.slice(0, 10)}T00:00:00Z`).getTime();
+  return Math.max(1, Math.floor((end - start) / 86400000));
+}
+
+function kenyaToday() {
+  return new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 async function findClient(supabase: any, businessId: string, accountNumber: string, payerPhone: string) {
   const accountDigits = digits(accountNumber);
   if (accountDigits) {
@@ -161,7 +171,7 @@ serve(async (req) => {
 
     const { data: loan } = await supabase
       .from("loans")
-      .select("id, outstanding_balance, total_paid, total_payable, total_interest, status")
+      .select("id, outstanding_balance, total_paid, total_payable, total_interest, status, maturity_date")
       .eq("business_id", businessId)
       .eq("client_id", client.id)
       .eq("status", "active")
@@ -227,7 +237,7 @@ serve(async (req) => {
       .order("due_date", { ascending: true });
 
     let remaining = appliedAmount;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = kenyaToday();
     for (const schedule of schedules || []) {
       if (remaining <= 0) break;
       const due = Number(schedule.total_due || 0);
@@ -246,14 +256,32 @@ serve(async (req) => {
 
     const newTotalPaid = Number((Number(loan.total_paid || 0) + appliedAmount).toFixed(2));
     const newBalance = Math.max(0, Number((totalPayable - newTotalPaid).toFixed(2)));
+    const { data: freshSchedules } = await supabase
+      .from("loan_schedules")
+      .select("due_date, total_due, total_paid, status")
+      .eq("loan_id", loan.id)
+      .order("due_date", { ascending: true });
+    const pastDue = (freshSchedules || []).filter((schedule: any) =>
+      String(schedule.due_date) < today &&
+      Number(schedule.total_due || 0) > Number(schedule.total_paid || 0) &&
+      schedule.status !== "paid"
+    );
+    const scheduleArrears = Number(pastDue.reduce((sum: number, schedule: any) =>
+      sum + Math.max(0, Number(schedule.total_due || 0) - Number(schedule.total_paid || 0)), 0).toFixed(2));
+    const pastMaturity = Boolean(loan.maturity_date && String(loan.maturity_date) < today && newBalance > 0.01);
+    const arrearsAmount = newBalance <= 0 ? 0 : (pastMaturity ? Math.max(scheduleArrears, newBalance) : scheduleArrears);
+    const arrearsDates = pastDue.map((schedule: any) => String(schedule.due_date));
+    if (pastMaturity) arrearsDates.push(String(loan.maturity_date));
+    arrearsDates.sort();
+    const overdueDays = arrearsAmount > 0.01 && arrearsDates.length ? daysBetween(arrearsDates[0], today) : 0;
     await supabase
       .from("loans")
       .update({
         total_paid: newTotalPaid,
         outstanding_balance: newBalance,
         status: newBalance <= 0 ? "completed" : loan.status,
-        arrears_amount: newBalance <= 0 ? 0 : undefined,
-        overdue_days: newBalance <= 0 ? 0 : undefined,
+        arrears_amount: arrearsAmount,
+        overdue_days: overdueDays,
       })
       .eq("id", loan.id);
 

@@ -556,6 +556,23 @@ function parseLocalDate(value){
   const d=new Date(value);
   return isNaN(d) ? null : d;
 }
+function loanArrearsSnapshot(loan,schedules,asOfDate=today()){
+  const asOf=parseLocalDate(asOfDate);
+  const outstanding=Number(loan?.outstanding_balance||0);
+  const pastDue=(schedules||[]).filter(s=>String(s.due_date)<String(asOfDate)&&Number(s.total_due||0)>Number(s.total_paid||0));
+  const scheduleArrears=Number(pastDue.reduce((sum,s)=>sum+Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0)),0).toFixed(2));
+  const pastMaturity=Boolean(loan?.maturity_date&&String(loan.maturity_date)<String(asOfDate)&&outstanding>0.01);
+  const arrears=pastMaturity?Math.max(scheduleArrears,outstanding):scheduleArrears;
+  const oldestDates=pastDue.map(s=>String(s.due_date));
+  if(pastMaturity)oldestDates.push(String(loan.maturity_date));
+  oldestDates.sort();
+  let days=0;
+  if(oldestDates.length&&asOf){
+    const oldest=parseLocalDate(oldestDates[0]);
+    days=oldest?Math.max(1,Math.floor((asOf-oldest)/(1000*60*60*24))):0;
+  }
+  return{arrears:Number(arrears.toFixed(2)),overdueDays:arrears>0.01?days:0,pastMaturity,schedules:pastDue};
+}
 const fmtDate = (d) => {if(!d)return '-';const dt=parseLocalDate(d);if(!dt)return '-';return `${String(dt.getDate()).padStart(2,'0')}/${String(dt.getMonth()+1).padStart(2,'0')}/${dt.getFullYear()}`};
 const fmtDateTime = (d) => {if(!d)return '-';const dt=new Date(d);return fmtDate(d)+' '+dt.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})};
 function localDateTime(d=new Date()){
@@ -1949,16 +1966,9 @@ async function renderDashboard(){
     const portfolio=active.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
     const outstanding=active.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
     const overdue=active.map(l=>{
-      const pastDue=(allScheds||[]).filter(s=>s.loan_id===l.id&&String(s.due_date)<todayStr&&Number(s.total_due||0)>Number(s.total_paid||0));
-      const scheduleArrears=pastDue.reduce((sum,s)=>sum+Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0)),0);
-      const pastMaturity=Boolean(l.maturity_date&&String(l.maturity_date)<todayStr&&Number(l.outstanding_balance||0)>0.01);
-      const arrears=pastMaturity?Math.max(scheduleArrears,Number(l.outstanding_balance||0)):scheduleArrears;
-      if(arrears<=0.01)return null;
-      const dates=pastDue.map(s=>String(s.due_date));
-      if(pastMaturity)dates.push(String(l.maturity_date));
-      dates.sort();
-      const days=Math.max(1,Math.floor((parseLocalDate(todayStr)-parseLocalDate(dates[0]))/(1000*60*60*24)));
-      return{...l,_dashboard_arrears:arrears,_dashboard_overdue_days:days};
+      const snap=loanArrearsSnapshot(l,(allScheds||[]).filter(s=>s.loan_id===l.id),todayStr);
+      if(snap.arrears<=0.01)return null;
+      return{...l,_dashboard_arrears:snap.arrears,_dashboard_overdue_days:snap.overdueDays};
     }).filter(Boolean);
     const par30=overdue.filter(l=>l._dashboard_overdue_days>30);
     const npl=overdue.filter(l=>l._dashboard_overdue_days>180);
@@ -2404,10 +2414,12 @@ async function viewClient(id){
     }
     const historyArrears=l=>{
       if(l.status!=='active'||Number(l.outstanding_balance||0)<=0.01)return 0;
-      const todayStr=today();
-      if(l.maturity_date&&String(l.maturity_date)<todayStr)return Number(l.outstanding_balance||0);
-      return clientSchedules.filter(s=>s.loan_id===l.id&&String(s.due_date)<todayStr)
-        .reduce((sum,s)=>sum+Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0)),0);
+      return loanArrearsSnapshot(l,clientSchedules.filter(s=>s.loan_id===l.id),today()).arrears;
+    };
+    const repaymentPercent=l=>{
+      const total=Number(l.total_payable||0);
+      if(total<=0)return 0;
+      return Math.min(100,Math.max(0,Number(l.total_paid||0)/total*100));
     };
     const photoInputId = `clientPhotoInput_${String(c.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
     const assetInputId = `clientAssetInput_${String(c.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
@@ -2468,7 +2480,7 @@ async function viewClient(id){
           <div class="kpi-value" style="font-size:14px;color:var(--accent-yellow)">${fmtMoney((cLoans||[]).filter(l=>l.status==='active').reduce((s,l)=>s+Number(l.outstanding_balance||0),0))}</div>
         </div>
       </div>
-      <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Disbursed</th><th>Principal</th><th>Total Payable</th><th>Paid</th><th>Balance</th><th>Arrears</th><th>Maturity</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Loan #</th><th>Disbursed</th><th>Principal</th><th>Total Payable</th><th>Paid</th><th>Paid %</th><th>Balance</th><th>Arrears</th><th>Maturity</th><th>Status</th><th>Actions</th></tr></thead><tbody>
       ${(cLoans||[]).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).map(l=>`
         <tr style="${l.status==='active'&&l.outstanding_balance>0?'':'opacity:0.6'}">
           <td><strong>${l.loan_no||'-'}</strong></td>
@@ -2476,6 +2488,7 @@ async function viewClient(id){
           <td>${fmtMoney(l.principal_amount)}</td>
           <td>${fmtMoney(l.total_payable)}</td>
           <td style="color:var(--accent-green)">${fmtMoney(l.total_paid)}</td>
+          <td><strong style="color:${repaymentPercent(l)>=100?'var(--accent-green)':repaymentPercent(l)>=50?'var(--accent-yellow)':'var(--accent-red)'}">${repaymentPercent(l).toFixed(1)}%</strong></td>
           <td><strong style="color:${l.outstanding_balance>0?'var(--accent-yellow)':'var(--accent-green)'}">${fmtMoney(l.outstanding_balance)}</strong></td>
           <td style="color:${historyArrears(l)>0?'var(--accent-red)':'var(--text-secondary)'}">${fmtMoney(historyArrears(l))}</td>
           <td style="white-space:nowrap;font-size:12px">${fmtDate(l.maturity_date)}</td>
@@ -2486,7 +2499,7 @@ async function viewClient(id){
             ${hasRole('admin','branch_manager')?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-yellow);color:var(--accent-yellow)" onclick="closeModal();openEditLoanModal('${l.id}')">Edit</button>`:''}
             ${hasRole('admin')?`<button class="btn btn-outline btn-sm" style="border-color:var(--accent-red);color:var(--accent-red)" onclick="closeModal();deleteLoanConfirm('${l.id}','${l.loan_no}')">Delete</button>`:''}
           </td>
-        </tr>`).join('')||'<tr><td colspan="10" style="text-align:center;color:var(--text-secondary);padding:20px">No loans</td></tr>'}
+        </tr>`).join('')||'<tr><td colspan="11" style="text-align:center;color:var(--text-secondary);padding:20px">No loans</td></tr>'}
       </tbody></table></div>
       <div class="modal-actions">
         ${hasRole('admin','branch_manager')?`<button class="btn btn-outline" onclick="editClient('${c.id}')">✏️ Edit Client</button>`:''}
@@ -4058,10 +4071,17 @@ async function confirmMpesaPayment(queueId,billRef,amount,transId){
 
     const mpNewPaid    = Number(mpLoanRef.total_paid||0) + amount;
     const mpNewBalance = Math.max(0, Number(mpLoanRef.outstanding_balance) - amount);
+    const{data:freshMpScheds}=await sb('loan_schedules')
+      .select('due_date,total_due,total_paid,status,installment_no')
+      .eq('loan_id',loan.id)
+      .order('due_date',{ascending:true});
+    const mpArrearsSnap=loanArrearsSnapshot({...mpLoanRef,outstanding_balance:mpNewBalance},freshMpScheds||[],today());
     await sb('loans').update({
       total_paid: mpNewPaid,
       outstanding_balance: mpNewBalance,
-      status: mpNewBalance <= 0 ? 'completed' : mpLoanRef.status
+      status: mpNewBalance <= 0 ? 'completed' : mpLoanRef.status,
+      arrears_amount: mpNewBalance <= 0 ? 0 : mpArrearsSnap.arrears,
+      overdue_days: mpNewBalance <= 0 ? 0 : mpArrearsSnap.overdueDays
     }).eq('id', loan.id);
     await sb('mpesa_callback_queue').update({confirmed:true,loan_id:loan.id}).eq('id',queueId);
     await audit('mpesa_payment_confirmed','loan_repayments',null,null,rec);
@@ -4322,30 +4342,16 @@ async function savePayment(){
       .select('due_date,total_due,total_paid,status,installment_no')
       .eq('loan_id',loanId)
       .order('due_date',{ascending:true});
-    let newArrears=0,newOverdueDays=0;
-    if(freshScheds&&freshScheds.length){
-      // Past-due rows where there is still an unpaid balance
-      const pastDueUnpaid=freshScheds.filter(s=>{
-        const isDue=s.due_date<todayStr2;
-        const unpaid=Number(s.total_due||0)-Number(s.total_paid||0);
-        return isDue && unpaid>0.01 && s.status!=='paid';
-      });
-      if(pastDueUnpaid.length){
-        pastDueUnpaid.sort((a,b)=>a.due_date.localeCompare(b.due_date));
-        const oldestDue=new Date(pastDueUnpaid[0].due_date);oldestDue.setHours(0,0,0,0);
-        const nowD=new Date();nowD.setHours(0,0,0,0);
-        newOverdueDays=Math.max(0,Math.floor((nowD-oldestDue)/(1000*60*60*24)));
-        newArrears=pastDueUnpaid.reduce((s,s2)=>s+(Number(s2.total_due||0)-Number(s2.total_paid||0)),0);
-      }
-    }
     const newPaid=Number(loanRef.total_paid)+amount;
     const newBalance=Math.max(0,Number(loanRef.outstanding_balance)-amount);
+    const arrearsLoan={...loanRef,outstanding_balance:newBalance};
+    const arrearsSnap=loanArrearsSnapshot(arrearsLoan,freshScheds||[],todayStr2);
     await sb('loans').update({
       total_paid:newPaid,
       outstanding_balance:newBalance,
       status:newBalance<=0?'completed':loanRef.status,
-      overdue_days:newBalance<=0?0:newOverdueDays,
-      arrears_amount:newBalance<=0?0:Number(Math.max(0,newArrears).toFixed(2))
+      overdue_days:newBalance<=0?0:arrearsSnap.overdueDays,
+      arrears_amount:newBalance<=0?0:arrearsSnap.arrears
     }).eq('id',loanId);
 
     await audit('payment_recorded','loan_repayments',null,null,rec);
@@ -5427,7 +5433,11 @@ async function renderOfficerDashboard(){
     const olb=oActive.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
 
     // Total arrears
-    const totalArrears=oActive.reduce((s,l)=>s+Number(l.arrears_amount||0),0);
+    const oArrearsLoans=oActive.map(l=>{
+      const snap=loanArrearsSnapshot(l,oScheds.filter(s=>s.loan_id===l.id),todayStr);
+      return{...l,_asof_arrears:snap.arrears,_asof_days:snap.overdueDays};
+    }).filter(l=>Number(l._asof_arrears||0)>0.01);
+    const totalArrears=oArrearsLoans.reduce((s,l)=>s+Number(l._asof_arrears||0),0);
 
     // Active clients (unique clients with active loans under this officer)
     const activeClientIds=new Set(oActive.map(l=>l.client_id));
@@ -5464,12 +5474,12 @@ async function renderOfficerDashboard(){
     const monthlyRate=monthDue>0?(monthPaid/monthDue*100):0;
 
     // Arrears collected this month (payments on overdue loans)
-    const arrearsLoanIds=new Set(oActive.filter(l=>l.overdue_days>0||l.arrears_amount>0).map(l=>l.id));
+    const arrearsLoanIds=new Set(oArrearsLoans.map(l=>l.id));
     const arrearsCollected=oReps.filter(r=>(r.payment_date||'').startsWith(nowM)&&arrearsLoanIds.has(r.loan_id))
       .reduce((s,r)=>s+Number(r.amount||0),0);
 
     // Book quality = (active clients - clients in arrears) / active clients × 100
-    const clientsInArrears=new Set(oActive.filter(l=>l.arrears_amount>0||l.overdue_days>0).map(l=>l.client_id)).size;
+    const clientsInArrears=new Set(oArrearsLoans.map(l=>l.client_id)).size;
     const bookQuality=activeClients>0?((activeClients-clientsInArrears)/activeClients*100):100;
 
     // Build officer selector HTML (admin only)
@@ -5600,16 +5610,19 @@ async function renderOfficerDashboard(){
         <table>
           <thead><tr><th>Client</th><th>Loan #</th><th>Type</th><th>Principal</th><th>Balance</th><th>Arrears</th><th>Status</th></tr></thead>
           <tbody>
-            ${oActive.slice(0,50).map(l=>`
+            ${oActive.slice(0,50).map(l=>{
+              const snap=loanArrearsSnapshot(l,oScheds.filter(s=>s.loan_id===l.id),todayStr);
+              return `
               <tr>
                 <td><strong>${l.loan_clients?.full_name||'-'}</strong><br><span style="font-size:10px;color:var(--text-secondary)">${l.loan_clients?.phone||''}</span></td>
                 <td>${l.loan_no}</td>
                 <td>${l.loan_type==='repeat_loan'?'<span class="badge badge-purple">Repeat</span>':'<span class="badge badge-blue">New</span>'}</td>
                 <td>${fmtMoney(l.principal_amount)}</td>
                 <td style="color:var(--accent-yellow)">${fmtMoney(l.outstanding_balance)}</td>
-                <td style="color:${Number(l.arrears_amount)>0?'var(--accent-red)':'var(--text-secondary)'}"><strong>${fmtMoney(l.arrears_amount)}</strong></td>
-                <td>${statusBadge(l.status)}${l.overdue_days>0?` <span class="badge badge-red">${l.overdue_days}d</span>`:''}</td>
-              </tr>`).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary)">No active loans</td></tr>'}
+                <td style="color:${Number(snap.arrears)>0?'var(--accent-red)':'var(--text-secondary)'}"><strong>${fmtMoney(snap.arrears)}</strong></td>
+                <td>${statusBadge(l.status)}${snap.overdueDays>0?` <span class="badge badge-red">${snap.overdueDays}d</span>`:''}</td>
+              </tr>`;
+            }).join('')||'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary)">No active loans</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -5937,7 +5950,7 @@ function downloadOfficerPerformanceReport(){
   const nowM = localISODate().slice(0,7);
   const data = rows.map(({o,oActive,oLoansMonth,outstanding,overdueLoans,collected})=>{
     const clientsInArr = new Set(overdueLoans.map(l=>l.client_id)).size;
-    const totalArrAmt  = overdueLoans.reduce((s,l)=>s+Number(l.arrears_amount||0),0);
+    const totalArrAmt  = overdueLoans.reduce((s,l)=>s+Number(l._asof_arrears||0),0);
     const bq  = oActive.length>0 ? ((oActive.length-clientsInArr)/oActive.length*100) : 100;
     const par = outstanding>0 ? (totalArrAmt/outstanding*100) : 0;
     const disbMonth = oLoansMonth.reduce((s,l)=>s+Number(l.principal_amount||0),0);
@@ -5963,7 +5976,7 @@ function downloadOfficerPerformanceReport(){
     'ACC Arrears (Clients)': rows.reduce((s,r)=>s+new Set(r.overdueLoans.map(l=>l.client_id)).size,0),
     'BQ %':              '',
     'OLB (KES)':         Number(rows.reduce((s,r)=>s+r.outstanding,0).toFixed(2)),
-    'Arrears (KES)':     Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+Number(l.arrears_amount||0),0),0).toFixed(2)),
+    'Arrears (KES)':     Number(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+Number(l._asof_arrears||0),0),0).toFixed(2)),
     'PAR %':             '',
     'Collections Month (KES)': Number(rows.reduce((s,r)=>s+r.collected,0).toFixed(2)),
     'Disbursed Month (KES)':   Number(rows.reduce((s,r)=>s+r.oLoansMonth.reduce((x,l)=>x+Number(l.principal_amount||0),0),0).toFixed(2))
@@ -5994,17 +6007,19 @@ async function renderOfficerPerformance(){
   const main=$('#mainContent');
   main.innerHTML='<div class="loading-overlay"><div class="spinner"></div></div>';
   try{
-    const[loansR,repsR,appsR,staffR]=await Promise.all([
+    const[loansR,repsR,appsR,staffR,schedsR]=await Promise.all([
       sb('loans').select('*,loan_clients(full_name)').eq('business_id',currentUser.business_id),
       sb('loan_repayments').select('*').eq('business_id',currentUser.business_id),
       sb('loan_applications').select('*').eq('business_id',currentUser.business_id),
       // FIX #13: loan_staff column is `name`, not `full_name`
-      sb('loan_staff').select('id,name,email,role').eq('business_id',currentUser.business_id)
+      sb('loan_staff').select('id,name,email,role').eq('business_id',currentUser.business_id),
+      sb('loan_schedules').select('loan_id,due_date,total_due,total_paid,status').eq('business_id',currentUser.business_id)
     ]);
     const allLoans=loansR.data||[];
     const allReps=repsR.data||[];
     const allApps=appsR.data||[];
     const allStaff=staffR.data||[];
+    const allScheds=schedsR.data||[];
 
     // Filter to staff who have the loan_officer role ONLY.
     // Admins/branch managers should not appear in officer performance —
@@ -6032,7 +6047,10 @@ async function renderOfficerPerformance(){
       const oClientIds = new Set(oLoans.map(l=>l.client_id));
       const portfolio = oActive.reduce((s,l)=>s+Number(l.principal_amount||0),0);
       const outstanding = oActive.reduce((s,l)=>s+Number(l.outstanding_balance||0),0);
-      const overdueLoans = oActive.filter(l=>l.overdue_days>0);
+      const overdueLoans = oActive.map(l=>{
+        const snap=loanArrearsSnapshot(l,allScheds.filter(s=>s.loan_id===l.id),today());
+        return{...l,_asof_arrears:snap.arrears,_asof_days:snap.overdueDays};
+      }).filter(l=>Number(l._asof_arrears||0)>0.01);
       // Collections this month attributed to officer's loans
       const oLoanIds = new Set(oLoans.map(l=>l.id));
       const oRepsMonth = allReps.filter(r=>r.loan_id && oLoanIds.has(r.loan_id) && r.payment_date && r.payment_date.startsWith(nowM));
@@ -6062,7 +6080,7 @@ async function renderOfficerPerformance(){
           <tbody>
             ${rows.map(({o,oLoans,oActive,oClientIds,portfolio,outstanding,overdueLoans,collected,oLoansMonth})=>{
               const clientsInArr=new Set(overdueLoans.map(l=>l.client_id)).size;
-              const totalArrAmt=overdueLoans.reduce((s,l)=>s+Number(l.arrears_amount||0),0);
+              const totalArrAmt=overdueLoans.reduce((s,l)=>s+Number(l._asof_arrears||0),0);
               const bq=oActive.length>0?((oActive.length-clientsInArr)/oActive.length*100):100;
               const par=outstanding>0?(totalArrAmt/outstanding*100):0;
               const disbMonth=oLoansMonth.reduce((s,l)=>s+Number(l.principal_amount||0),0);
@@ -6090,7 +6108,7 @@ async function renderOfficerPerformance(){
               <td><strong>${rows.reduce((s,r)=>s+new Set(r.overdueLoans.map(l=>l.client_id)).size,0)}</strong></td>
               <td></td>
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.outstanding,0))}</strong></td>
-              <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+Number(l.arrears_amount||0),0),0))}</strong></td>
+              <td><strong style="color:var(--accent-red)">${fmtMoney(rows.reduce((s,r)=>s+r.overdueLoans.reduce((x,l)=>x+Number(l._asof_arrears||0),0),0))}</strong></td>
               <td></td>
               <td><strong style="color:var(--accent-green)">${fmtMoney(rows.reduce((s,r)=>s+r.collected,0))}</strong></td>
               <td><strong>${fmtMoney(rows.reduce((s,r)=>s+r.oLoansMonth.reduce((x,l)=>x+Number(l.principal_amount||0),0),0))}</strong></td>
