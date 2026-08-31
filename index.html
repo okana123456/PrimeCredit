@@ -4589,9 +4589,15 @@ async function renderOverdue(opts){
 
     // Arrears are strictly before asOfDate. An installment due on the
     // report date remains a current due and only becomes arrears tomorrow.
+    // Count by unpaid amount instead of trusting status only, because legacy
+    // rows can have a stale status while still carrying a real unpaid balance.
+    const isCollectibleSchedule=function(s){
+      const status=String(s.status||'').toLowerCase();
+      return !['restructured','cancelled','canceled','waived','void','written_off'].includes(status);
+    };
     const missed=allScheds.filter(s=>{
       const unpaid=Number(s.total_due||0)-Number(s.total_paid||0);
-      return unpaid>0.01 && ['pending','partial','overdue'].includes(s.status);
+      return unpaid>0.01 && isCollectibleSchedule(s);
     });
 
     // Group by loan to compute per-loan overdue_days & arrears
@@ -4643,7 +4649,7 @@ async function renderOverdue(opts){
     overdueLoans.forEach(l=>{const d=Number(l._asof_days!=null?l._asof_days:l.overdue_days||0);if(d<=30)buckets[0]++;else if(d<=60)buckets[1]++;else if(d<=90)buckets[2]++;else if(d<=180)buckets[3]++;else buckets[4]++;});
     const totalArrears=overdueLoans.reduce((s,l)=>s+Number(l._asof_arrears!=null?l._asof_arrears:l.arrears_amount||0),0);
 
-    // Build missed installment rows (flat)
+    // Build missed installment detail rows and combined per-loan rows
     const missedRows=[];
     overdueLoans.forEach(loan=>{
       (loan._scheds||[]).forEach(s=>{
@@ -4653,8 +4659,25 @@ async function renderOverdue(opts){
       });
     });
     missedRows.sort((a,b)=>b.daysOld-a.daysOld);
+    const missedLoanRows=overdueLoans.map(loan=>{
+      const scheds=(loan._scheds||[]).slice().sort((a,b)=>String(a.due_date||'').localeCompare(String(b.due_date||'')));
+      const oldest=scheds[0]||{};
+      const totalDue=scheds.reduce((sum,s)=>sum+Number(s.total_due||0),0);
+      const totalPaid=scheds.reduce((sum,s)=>sum+Number(s.total_paid||0),0);
+      const remaining=scheds.reduce((sum,s)=>sum+Math.max(0,Number(s.total_due||0)-Number(s.total_paid||0)),0);
+      return {
+        loan,
+        scheds,
+        installmentList:scheds.map(s=>'#'+s.installment_no).join(', '),
+        oldestDue:oldest.due_date||loan.maturity_date||asOfDate,
+        totalDue,
+        totalPaid,
+        remaining,
+        daysOld:Number(loan._asof_days||0)
+      };
+    }).filter(row=>row.remaining>0.01||Number(row.loan._asof_arrears||0)>0.01).sort((a,b)=>b.daysOld-a.daysOld);
 
-    window._overdueSnapshot={asOfDate,overdueLoans,missedRows};
+    window._overdueSnapshot={asOfDate,overdueLoans,missedRows,missedLoanRows};
 
     // ── Build arrears page using safe string concatenation (no nested backticks) ──
     function makeSection(id, title, count, amtStr, bodyHtml, btnHtml){
@@ -4674,24 +4697,26 @@ async function renderOverdue(opts){
       '</div>';
     }
 
-    // ── Missed Installments table ──
+    // ── Missed Installments table, combined to one row per loan/client ──
     let missedHtml = '<div class="table-wrap"><table style="font-size:12px"><thead><tr>' +
-      '<th>Client</th><th>Phone</th><th>Loan #</th><th>Inst #</th><th>Due Date</th><th>Amount Due</th><th>Paid</th><th>Remaining</th><th>Arrears</th><th>Loan Balance</th><th>Officer</th><th>Days Overdue</th><th>Actions</th>' +
+      '<th>Client</th><th>Phone</th><th>Loan #</th><th>Missed Inst.</th><th>Oldest Due</th><th>Total Due</th><th>Paid</th><th>Remaining</th><th>Arrears</th><th>Loan Balance</th><th>Officer</th><th>Days Overdue</th><th>Actions</th>' +
       '</tr></thead><tbody>';
-    if(missedRows.length){
-      missedRows.forEach(function(item){
-        var loan=item.loan, s=item.s, remaining=item.remaining, daysOld=item.daysOld;
+    if(missedLoanRows.length){
+      missedLoanRows.forEach(function(item){
+        var loan=item.loan, remaining=item.remaining, daysOld=item.daysOld;
         var color=daysOld>90?'var(--accent-red)':daysOld>30?'var(--accent-orange)':'var(--accent-yellow)';
+        var arrears=Number(loan._asof_arrears!=null?loan._asof_arrears:loan.arrears_amount||0);
         missedHtml += '<tr>' +
           '<td><strong>'+(loan.loan_clients?.full_name||'-')+'</strong></td>' +
           '<td><a href="tel:'+(loan.loan_clients?.phone||'')+'" style="color:var(--accent-blue)">'+(loan.loan_clients?.phone||'-')+'</a></td>' +
           '<td>'+loan.loan_no+'</td>' +
-          '<td style="text-align:center">#'+s.installment_no+'</td>' +
-          '<td>'+fmtDate(s.due_date)+'</td>' +
-          '<td>'+fmtMoney(s.total_due)+'</td>' +
-          '<td style="color:var(--accent-green)">'+fmtMoney(s.total_paid)+'</td>' +
+          '<td style="text-align:center">'+(item.installmentList||'-')+'</td>' +
+          '<td>'+fmtDate(item.oldestDue)+'</td>' +
+          '<td>'+fmtMoney(item.totalDue)+'</td>' +
+          '<td style="color:var(--accent-green)">'+fmtMoney(item.totalPaid)+'</td>' +
           '<td style="color:var(--accent-red);font-weight:700">'+fmtMoney(remaining)+'</td>' +
-          (function(){ var missedLoanArrears = loanArrears[loan.id] ? loanArrears[loan.id].arrears : 0; return '<td style="color:'+(missedLoanArrears>0?'var(--accent-red)':'var(--text-secondary)')+';font-weight:700">'+(missedLoanArrears>0?fmtMoney(missedLoanArrears):'—')+'</td>'+'<td style="color:var(--accent-yellow);font-weight:700">'+fmtMoney(loan.outstanding_balance||0)+'</td>'; })() +
+          '<td style="color:'+(arrears>0?'var(--accent-red)':'var(--text-secondary)')+';font-weight:700">'+(arrears>0?fmtMoney(arrears):'—')+'</td>' +
+          '<td style="color:var(--accent-yellow);font-weight:700">'+fmtMoney(loan.outstanding_balance||0)+'</td>' +
           '<td><span class="badge badge-gray" style="text-transform:capitalize">'+((window._staffMap && loan.loan_officer_id && window._staffMap[loan.loan_officer_id])||'Unassigned')+'</span></td>' +
           '<td><span class="badge" style="background:'+color+';color:#fff">'+daysOld+'d</span></td>' +
           '<td>'+(hasRole('admin','branch_manager','cashier')?'<button class="btn btn-success btn-sm" onclick="openPaymentModal(\''+loan.id+'\')">Pay</button> ':'')+'<button class="btn btn-outline btn-sm" onclick="addFollowUp(\''+loan.id+'\',\''+loan.client_id+'\')">Follow-Up</button></td>' +
@@ -4701,7 +4726,7 @@ async function renderOverdue(opts){
       missedHtml += '<tr><td colspan="13" style="text-align:center;color:var(--text-secondary);padding:12px">No missed installments</td></tr>';
     }
     missedHtml += '</tbody></table></div>';
-    const missedArrears = missedRows.reduce(function(s,r){return s+r.remaining;},0);
+    const missedArrears = missedLoanRows.reduce(function(s,r){return s+r.remaining;},0);
 
     // ── 3. Loan Summary table ──
     let summaryHtml = '<div class="table-wrap"><table style="font-size:12px"><thead><tr>' +
@@ -4768,7 +4793,7 @@ async function renderOverdue(opts){
         '</div>' +
       '</div>' +
       // Missed installments (open by default)
-      makeSection('missed', '⚠️ Missed Installments — as of '+asOfDate, missedRows.length, 'KES '+fmtMoney(missedArrears)+' unpaid', missedHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadMissedExcel()">⬇ Excel</button>') +
+      makeSection('missed', '⚠️ Loans with Missed Installments — as of '+asOfDate, missedLoanRows.length, 'KES '+fmtMoney(missedArrears)+' unpaid', missedHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadMissedExcel()">⬇ Excel</button>') +
       // Loan summary (collapsed by default)
       makeSection('loansummary', '📊 Loan-Level Arrears Summary', overdueLoans.length, 'KES '+fmtMoney(totalArrears), summaryHtml, '<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();downloadArrearsSummaryExcel()">⬇ Excel</button>') +
       // PAR / Chart (collapsed by default)
@@ -4925,27 +4950,28 @@ function downloadDuesExcel(){
 
 function downloadMissedExcel(){
   const snap=window._overdueSnapshot;
-  if(!snap||!snap.missedRows){toast('No data to download','error');return;}
-  const{asOfDate,missedRows}=snap;
-  if(!missedRows.length){toast('No missed installments to download','warning');return;}
-  const sheet=missedRows.map(({loan,s,remaining,daysOld})=>({
+  if(!snap){toast('No data to download','error');return;}
+  const{asOfDate}=snap;
+  const rows=snap.missedLoanRows||[];
+  if(!rows.length){toast('No missed installments to download','warning');return;}
+  const sheet=rows.map(({loan,installmentList,oldestDue,totalDue,totalPaid,remaining,daysOld})=>({
     'Loan #':loan.loan_no,
     'Client Name':loan.loan_clients?.full_name||'-',
     'Phone':loan.loan_clients?.phone||'-',
     'Loan Officer':(window._staffMap && loan.loan_officer_id) ? window._staffMap[loan.loan_officer_id] : 'Unassigned',
-    'Installment #':s.installment_no,
-    'Due Date':s.due_date,
-    'Amount Due (KES)':Number(s.total_due||0),
-    'Amount Paid (KES)':Number(s.total_paid||0),
+    'Missed Installments':installmentList||'-',
+    'Oldest Due Date':oldestDue,
+    'Total Due (KES)':Number(totalDue||0),
+    'Total Paid (KES)':Number(totalPaid||0),
     'Remaining (KES)':remaining,
     'Arrears (KES)':Number(loan._asof_arrears != null ? loan._asof_arrears : loan.arrears_amount||0),
     'Outstanding Balance (KES)':Number(loan.outstanding_balance||0),
     'Days Overdue':daysOld
   }));
   const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(sheet),'Missed Installments');
-  XLSX.writeFile(wb,'Missed_Installments_'+asOfDate+'.xlsx');
-  toast('Missed installments report downloaded!','success');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(sheet),'Missed Loans');
+  XLSX.writeFile(wb,'Missed_Loans_'+asOfDate+'.xlsx');
+  toast('Missed loans report downloaded!','success');
 }
 
 function downloadArrearsSummaryExcel(){
