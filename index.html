@@ -646,6 +646,26 @@ function escapeHtml(v){
   return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
 }
 
+function repaymentProgressStats(loan, paidOverride=null){
+  const total=Number(loan?.total_payable||0);
+  const paid=Math.max(0,Number(paidOverride ?? loan?.total_paid ?? 0));
+  const pct=total>0?Math.min(100,Math.max(0,(paid/total)*100)):0;
+  const remaining=Math.max(0,total-paid);
+  const color=pct>=100?'var(--accent-green)':pct>=50?'var(--accent-yellow)':'var(--accent-red)';
+  return {total,paid,pct,remaining,color};
+}
+
+function repaymentProgressHtml(loan, paidOverride=null){
+  const p=repaymentProgressStats(loan, paidOverride);
+  return `
+    <div style="min-width:96px">
+      <div style="font-weight:800;color:${p.color};font-variant-numeric:tabular-nums">${p.pct.toFixed(1)}%</div>
+      <div class="dash-rate-bar" style="height:6px;margin-top:4px">
+        <div class="dash-rate-fill" style="width:${p.pct.toFixed(1)}%;background:${p.color}"></div>
+      </div>
+    </div>`;
+}
+
 const CLIENT_PHOTO_BUCKET = 'client-photos';
 const CLIENT_ASSET_BUCKET = 'client-assets';
 const PHOTO_FILE_ACCEPT = 'image/*,.jpg,.jpeg,.png,.webp';
@@ -2416,11 +2436,6 @@ async function viewClient(id){
       if(l.status!=='active'||Number(l.outstanding_balance||0)<=0.01)return 0;
       return loanArrearsSnapshot(l,clientSchedules.filter(s=>s.loan_id===l.id),today()).arrears;
     };
-    const repaymentPercent=l=>{
-      const total=Number(l.total_payable||0);
-      if(total<=0)return 0;
-      return Math.min(100,Math.max(0,Number(l.total_paid||0)/total*100));
-    };
     const photoInputId = `clientPhotoInput_${String(c.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
     const assetInputId = `clientAssetInput_${String(c.id).replace(/[^a-zA-Z0-9_-]/g,'')}`;
     const assetPhotos = clientAssetPaths(c);
@@ -2488,7 +2503,7 @@ async function viewClient(id){
           <td>${fmtMoney(l.principal_amount)}</td>
           <td>${fmtMoney(l.total_payable)}</td>
           <td style="color:var(--accent-green)">${fmtMoney(l.total_paid)}</td>
-          <td><strong style="color:${repaymentPercent(l)>=100?'var(--accent-green)':repaymentPercent(l)>=50?'var(--accent-yellow)':'var(--accent-red)'}">${repaymentPercent(l).toFixed(1)}%</strong></td>
+          <td>${repaymentProgressHtml(l)}</td>
           <td><strong style="color:${l.outstanding_balance>0?'var(--accent-yellow)':'var(--accent-green)'}">${fmtMoney(l.outstanding_balance)}</strong></td>
           <td style="color:${historyArrears(l)>0?'var(--accent-red)':'var(--text-secondary)'}">${fmtMoney(historyArrears(l))}</td>
           <td style="white-space:nowrap;font-size:12px">${fmtDate(l.maturity_date)}</td>
@@ -3798,6 +3813,7 @@ async function viewClientPayments(loanId){
       +'<td>'+fmtDate(p.payment_date||p.created_at)+'</td>'
       +'<td>'+typeTag+'</td>'
       +'<td><strong>'+fmtMoney(p.amount)+'</strong></td>'
+      +'<td>'+repaymentProgressHtml(loan, runningPaid)+'</td>'
       +'<td>'+(p.payment_method||'-')+'</td>'
       +'<td>'+(p.receipt_no||'-')+'</td>'
       +'<td>'
@@ -3811,13 +3827,15 @@ async function viewClientPayments(loanId){
 
   const totalPaid = runningPaid;
   const finalBal = Math.max(0, totalPayable - totalPaid);
+  const finalProgress = repaymentProgressStats(loan, totalPaid);
 
   openModal(`
     <h2>💳 Payment History — ${clientName}</h2>
-    <div class="card" style="margin-bottom:12px;font-size:12px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px">
+    <div class="card" style="margin-bottom:12px;font-size:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px">
       <div><div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase">Loan #</div><strong>${loan.loan_no}</strong></div>
       <div><div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase">Total Payable</div><strong>${fmtMoney(totalPayable)}</strong></div>
       <div><div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase">Total Paid</div><strong style="color:var(--accent-green)">${fmtMoney(totalPaid)}</strong></div>
+      <div><div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase">Paid Progress</div><strong style="color:${finalProgress.color}">${finalProgress.pct.toFixed(1)}%</strong></div>
       <div><div style="font-size:10px;color:var(--text-secondary);text-transform:uppercase">Balance</div><strong style="color:${finalBal<=0?'var(--accent-green)':'var(--accent-red)'}">${finalBal<=0?'Cleared ✅':fmtMoney(finalBal)}</strong></div>
     </div>
     ${procFee>0?`
@@ -3830,10 +3848,10 @@ async function viewClientPayments(loanId){
       <table>
         <thead><tr>
           <th>Date</th><th>Type</th><th>Amount (KES)</th>
-          <th>Method</th><th>Receipt</th><th>Balance After</th>
+          <th>Paid % After</th><th>Method</th><th>Receipt</th><th>Balance After</th>
         </tr></thead>
         <tbody>
-          ${rows.join('')||'<tr><td colspan="6" style="text-align:center;color:var(--text-secondary)">No payments recorded yet</td></tr>'}
+          ${rows.join('')||'<tr><td colspan="7" style="text-align:center;color:var(--text-secondary)">No payments recorded yet</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -3938,10 +3956,12 @@ async function renderRepayments(page=1){
         <div class="table-wrap"><table><thead><tr><th>Trans ID</th><th>Amount</th><th>Phone</th><th>Account Ref</th><th>Time</th><th>Actions</th></tr></thead><tbody>
         ${myQueue.map(q=>`<tr><td>${escapeHtml(q.trans_id||'-')}</td><td>${fmtMoney(q.trans_amount)}</td><td>${paymentPhoneHtml(q)}</td><td>${escapeHtml(q.bill_ref_number||'-')}</td><td>${fmtDateTime(q.created_at)}</td><td>${canPay?`<button class="btn btn-success btn-sm" onclick="confirmMpesaPayment('${q.id}','${q.msisdn||q.bill_ref_number||''}',${q.trans_amount},'${q.trans_id}')">Confirm</button> <button class="btn btn-outline btn-sm" onclick="dismissMpesaPayment('${q.id}')">Dismiss</button>`:''}</td></tr>`).join('')}
         </tbody></table></div></div>`:''}
-      <div class="table-wrap"><table><thead><tr><th>Receipt</th><th>Client</th><th>Phone</th><th>Loan #</th><th>Type</th><th>Reference</th><th>Amount (KES)</th><th>Balance Remaining</th><th>Method</th><th>Date & Time</th><th>Actions</th></tr></thead><tbody>
+      <div class="table-wrap"><table><thead><tr><th>Receipt</th><th>Client</th><th>Phone</th><th>Loan #</th><th>Type</th><th>Reference</th><th>Amount (KES)</th><th>Paid % After</th><th>Balance Remaining</th><th>Method</th><th>Date & Time</th><th>Actions</th></tr></thead><tbody>
       ${p.items.map(r=>{
         // Balance AFTER this specific payment (running balance, not current balance)
         const balRem   = cachedData._balAfterMap?.[r.id] ?? Number(r.loans?.outstanding_balance ?? 0);
+        const totalPayable = Number(r.loans?.total_payable||0);
+        const paidAfter = totalPayable>0 ? Math.max(0,totalPayable-Number(balRem||0)) : Number(r.loans?.total_paid||0);
         const procFee  = Number(r.loans?.processing_fee ?? 0);
         // Detect payment type from notes or penalty_portion
         const notes    = (r.notes||'').toLowerCase();
@@ -3980,13 +4000,14 @@ async function renderRepayments(page=1){
           '<td>',payType,'</td>',
           '<td><span style="font-family:monospace">',rref,'</span></td>',
           '<td><strong>',ramt,'</strong></td>',
+          '<td>',repaymentProgressHtml(r.loans, paidAfter),'</td>',
           '<td>',balCell,'</td>',
           '<td>',rmethod,'</td>',
           '<td>',rdate,'</td>',
           '<td><button class="btn btn-outline btn-sm" data-repayment-id="',rid,'" onclick="printReceipt(this.dataset.repaymentId)">Print</button></td>',
           '</tr>'
         ].join('');
-      }).join('')||'<tr><td colspan="11" style="text-align:center;color:var(--text-secondary)">No repayments recorded for this period</td></tr>'}
+      }).join('')||'<tr><td colspan="12" style="text-align:center;color:var(--text-secondary)">No repayments recorded for this period</td></tr>'}
       </tbody></table></div>
       ${paginationHtml(p,'renderRepayments')}
     `;
@@ -4405,7 +4426,10 @@ function exportRepaymentsExcel(){
     const isProcFee=notes.includes('processing fee');
     const isPenalty=Number(r.penalty_portion||0)>0||notes.includes('penalty')||notes.includes('rollover');
     const payType=isProcFee?'Processing Fee':isPenalty?'Penalty':'Repayment';
-    const balRem=Number(r.loans?.outstanding_balance??0);
+    const balRem=Number(cachedData._balAfterMap?.[r.id] ?? r.loans?.outstanding_balance ?? 0);
+    const totalPayable=Number(r.loans?.total_payable||0);
+    const paidAfter=totalPayable>0?Math.max(0,totalPayable-balRem):Number(r.loans?.total_paid||0);
+    const paidPct=repaymentProgressStats(r.loans, paidAfter).pct;
     const procFee=Number(r.loans?.processing_fee??0);
     return {
       'Receipt':           r.receipt_no,
@@ -4415,6 +4439,7 @@ function exportRepaymentsExcel(){
       'Payment Type':      payType,
       'Reference':         r.payment_reference||'-',
       'Amount (KES)':      Number(r.amount||0),
+      'Paid % After':      Number(paidPct.toFixed(2)),
       'Balance Remaining': balRem<=0?'Cleared':Number(balRem.toFixed(2)),
       'Processing Fee (KES)': procFee>0?Number(procFee.toFixed(2)):'',
       'Proc Fee Status':   procFee>0?'Deducted from disbursement':'',
@@ -4423,7 +4448,7 @@ function exportRepaymentsExcel(){
     };
   });
   const ws=XLSX.utils.json_to_sheet(data);
-  ws['!cols']=[{wch:14},{wch:22},{wch:14},{wch:12},{wch:16},{wch:16},{wch:12},{wch:16},{wch:16},{wch:14},{wch:12},{wch:20}];
+  ws['!cols']=[{wch:14},{wch:22},{wch:14},{wch:12},{wch:16},{wch:16},{wch:12},{wch:12},{wch:16},{wch:16},{wch:14},{wch:12},{wch:20}];
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'Repayments');
   XLSX.writeFile(wb,'PrimeCredit_Repayments.xlsx');
